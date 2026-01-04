@@ -14,6 +14,9 @@ export interface IUser extends mongoose.Document {
   profilePicture?: string
   passwordResetToken?: string
   passwordResetExpires?: Date
+  // TODO: When reactivating emails, these fields help track users who need welcome emails
+  welcomeEmailSent?: boolean // Track if welcome email was sent to users created via manual booking
+  createdViaManualBooking?: boolean // Track if user was created via admin manual booking
   comparePassword: (candidate: string) => Promise<boolean>
   createPasswordResetToken: () => string
 }
@@ -30,11 +33,17 @@ const userSchema = new mongoose.Schema<IUser>({
   profilePicture: { type: String },
   passwordResetToken: { type: String },
   passwordResetExpires: Date,
+  // TODO: When reactivating emails, ensure indexes are created for these fields
+  welcomeEmailSent: { type: Boolean, default: false },
+  createdViaManualBooking: { type: Boolean, default: false },
 }, { timestamps: true })
 
 // Add indexes for performance (email already has unique: true in schema)
 userSchema.index({ role: 1, isActive: 1 })
 userSchema.index({ isVerified: 1, isActive: 1 })
+userSchema.index({ phone: 1 }) // Index for phone number searches
+// TODO: When reactivating emails, verify these indexes are created for efficient queries
+userSchema.index({ createdViaManualBooking: 1, welcomeEmailSent: 1 })
 
 // Hash password
 userSchema.pre('save', async function (next) {

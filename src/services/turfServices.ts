@@ -1,6 +1,7 @@
 import type { ITurf } from '../models/Turf'
 import mongoose from 'mongoose'
 import { Turf } from '../models/Turf'
+import { Facility } from '../models/Facility'
 
 // Creating new turf service
 export async function createTurf(data: Partial<ITurf>) {
@@ -13,7 +14,20 @@ export async function findTurfById(id: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return null
   }
-  return Turf.findById(id).populate('admins', 'name email')
+  const turf = await Turf.findById(id).populate('admins', 'name email').lean()
+  
+  if (!turf) {
+    return null
+  }
+
+  // Fetch facilities for this turf and attach to turf object
+  const facilities = await Facility.find({ turf: id }).lean()
+  
+  // Convert to plain object and attach facilities
+  return {
+    ...turf,
+    facilities: facilities || [],
+  }
 }
 
 // Find turf by slug
@@ -26,10 +40,26 @@ export async function findTurfBySlug(slug: string) {
 
 //  Get turf by ID or slug (flexible function)
 export async function findTurf(identifier: string) {
+  let turf
   if (mongoose.Types.ObjectId.isValid(identifier)) {
-    return Turf.findById(identifier)
+    turf = await Turf.findById(identifier).lean()
   }
-  return Turf.findOne({ slug: identifier })
+  else {
+    turf = await Turf.findOne({ slug: identifier }).lean()
+  }
+
+  if (!turf) {
+    return null
+  }
+
+  // Fetch facilities for this turf and attach to turf object
+  const facilities = await Facility.find({ turf: turf._id }).lean()
+  
+  // Convert to plain object and attach facilities
+  return {
+    ...turf,
+    facilities: facilities || [],
+  }
 }
 
 // Update turf services

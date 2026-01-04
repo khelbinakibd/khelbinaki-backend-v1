@@ -1,6 +1,7 @@
 import type { IBooking } from '../models/Booking'
 import type { ITurf } from '../models/Turf'
 import type { IUser } from '../models/User'
+import { env } from '../config/env'
 import { sendEmail } from '../utils/sendEmail'
 
 export async function sendBookingConfirmationEmail(user: IUser, booking: IBooking, turf: ITurf) {
@@ -54,4 +55,38 @@ export async function sendTemplatedEmail(options: TemplatedEmailOption) {
     </div>
   `
   await sendEmail({ to, subject, html: emailHtml })
+}
+
+/**
+ * Send welcome email to user with password setup link
+ * TODO: When reactivating emails, test this function thoroughly
+ * TODO: When reactivating emails, verify email template is correct
+ * TODO: When reactivating emails, ensure CLIENT_URL is set correctly for password reset link
+ */
+export async function sendWelcomeEmail(user: IUser) {
+  // Generate password reset token for password setup
+  const resetToken = user.createPasswordResetToken()
+  await user.save({ validateBeforeSave: false })
+
+  const emailHtml = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; padding: 20px;">
+      <h1>Welcome to Khelbi Naki!</h1>
+      <p>Hello ${user.name},</p>
+      <p>An account has been created for you. Please set your password to access your account.</p>
+      <p><a href="${env.CLIENT_URL}/reset-password/${resetToken}" style="background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Set Your Password</a></p>
+      <p>This link will expire in 10 minutes.</p>
+      <p>If you need a new link, you can use the "Forgot Password" feature on the login page.</p>
+      <p>Sincerely,<br/>The Khelbi Naki Team</p>
+    </div>
+  `
+
+  await sendEmail({
+    to: user.email,
+    subject: 'Welcome to Khelbi Naki - Set Your Password',
+    html: emailHtml,
+  })
+
+  // Mark welcome email as sent
+  user.welcomeEmailSent = true
+  await user.save()
 }

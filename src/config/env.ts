@@ -45,6 +45,8 @@ export const env = {
   CORS_ORIGINS: process.env.CORS_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:5173'],
 
   // Email Configuration
+  // TODO: When reactivating emails, set EMAIL_ENABLED=true in environment variables
+  EMAIL_ENABLED: process.env.EMAIL_ENABLED === 'true', // Default: false (emails disabled)
   EMAIL_HOST: process.env.EMAIL_HOST || 'localhost',
   EMAIL_PORT: Number(process.env.EMAIL_PORT ?? 1025),
   EMAIL_USER: process.env.EMAIL_USER,

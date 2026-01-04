@@ -11,6 +11,7 @@ import { attachRequestId, requestLogger } from './middlewares/requestLogger'
 import adminRouter from './routes/adminRoutes'
 import authRouter from './routes/authRoutes'
 import bookingRouter from './routes/bookingRoutes'
+import facilityRouter from './routes/facilityRoutes'
 import supportRouter from './routes/supportRoutes'
 import turfRouter from './routes/turfRoutes'
 import userRouter from './routes/userRoutes'
@@ -168,6 +169,8 @@ app.use('/api/v1/auth', authRouter)
 app.use('/api/v1/users', userRouter)
 // Turf routes
 app.use('/api/v1/turfs', turfRouter)
+// Facility routes
+app.use('/api/v1', facilityRouter)
 // Booking routes
 app.use('/api/v1/bookings', bookingRouter)
 // Support routes (contact, report)

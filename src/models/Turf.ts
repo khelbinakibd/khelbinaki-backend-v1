@@ -21,12 +21,13 @@ export interface ITurf extends mongoose.Document {
     city: string
   }
   description?: string
-  pricingRules: IPricingRule[]
-  defaultPricePerSlot: number
+  pricingRules?: IPricingRule[] // Deprecated: no longer used, pricing is at facility level
+  defaultPricePerSlot?: number // Deprecated: no longer used, pricing is at facility level
   bkashNumber: string
   amenities: string[]
   images: string[]
   operatingHours: { start: string, end: string }
+  capacity?: number // Optional capacity field (number of players)
   admins: mongoose.Types.ObjectId[]
   createdAt: Date
   isActive: boolean
@@ -63,8 +64,9 @@ const turfSchema = new mongoose.Schema<ITurf>({
 
   bkashNumber: { type: String, required: true },
 
-  pricingRules: [pricingRulesSchema],
-  defaultPricePerSlot: { type: Number, required: true },
+  // Deprecated: pricing fields are no longer used (pricing is at facility level)
+  pricingRules: [pricingRulesSchema], // Optional: deprecated, kept for backward compatibility
+  defaultPricePerSlot: { type: Number }, // Optional: deprecated, kept for backward compatibility
 
   amenities: { type: [String], default: [] },
   images: { type: [String], default: [] },
@@ -72,6 +74,7 @@ const turfSchema = new mongoose.Schema<ITurf>({
     start: { type: String, required: true },
     end: { type: String, required: true },
   },
+  capacity: { type: Number, min: 1 }, // Optional capacity field
   admins: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }],
   isActive: { type: Boolean, default: true, index: true },
 }, { timestamps: true })

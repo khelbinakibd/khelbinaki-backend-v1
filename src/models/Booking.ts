@@ -3,6 +3,7 @@ import mongoose from 'mongoose'
 export interface IBooking extends mongoose.Document {
   user: mongoose.Types.ObjectId
   turf: mongoose.Types.ObjectId
+  facility: mongoose.Types.ObjectId // Required after migration
   date: Date
   startTime: string
   endTime: string
@@ -25,6 +26,7 @@ export interface IBooking extends mongoose.Document {
 const bookingSchema = new mongoose.Schema<IBooking>({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   turf: { type: mongoose.Schema.Types.ObjectId, ref: 'Turf', required: true },
+  facility: { type: mongoose.Schema.Types.ObjectId, ref: 'Facility', required: false }, // Optional initially for migration
   date: { type: Date, required: true },
   startTime: { type: String, required: true },
   endTime: { type: String, required: true },
@@ -51,6 +53,7 @@ const bookingSchema = new mongoose.Schema<IBooking>({
 }, { timestamps: true })
 
 bookingSchema.index({ turf: 1, date: 1, startTime: 1 })
+bookingSchema.index({ facility: 1, date: 1, startTime: 1 }) // For facility-specific availability queries
 bookingSchema.index({ user: 1, createdAt: -1 })
 bookingSchema.index({ dayType: 1, date: 1 })
 bookingSchema.index({ status: 1, paymentStatus: 1 })

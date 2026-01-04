@@ -1,5 +1,6 @@
 import type { Response } from 'express'
 import type { Types } from 'mongoose'
+import crypto from 'node:crypto'
 import type { AuthRequest } from '../middlewares/authMiddleware'
 import { Booking } from '../models/Booking'
 import { Turf } from '../models/Turf'
@@ -10,7 +11,8 @@ import { createBooking } from '../services/bookingServices'
 import { getAdminDashboardStats, getManagerDashboardStats } from '../services/dashboardService'
 import { sendBookingConfirmationEmail } from '../services/emailServices'
 import { deleteReport, getReportById, getReports, updateReportStatus } from '../services/supportServices'
-import { calculateBookingPrice } from '../services/turfPricingService'
+import { calculateFacilityPrice } from '../services/facilityPricingService'
+import { Facility } from '../models/Facility'
 import { findTurfById, updateTurf } from '../services/turfServices'
 import { uploadToCloudinary } from '../services/uploadService'
 import { updateUserById } from '../services/userServices'
@@ -19,10 +21,12 @@ import asyncHandler from '../utils/asyncHandler'
 import { paginate } from '../utils/pagination'
 
 function ensureAdminCanAccessReport(req: AuthRequest, report: any) {
-  if (req.user?.role !== 'admin') {
+  // Managers can access all reports
+  if (req.user?.role === 'manager') {
     return
   }
 
+  // For turf admins (role 'admin' or 'user' who is in turf.admins), check if they manage this turf
   const turf = report.turfId as { admins?: Types.ObjectId[] } | undefined
   const admins = turf?.admins || []
   const manages = Array.isArray(admins) && admins.some((adminId: Types.ObjectId) => adminId.toString() === req.user!.id)
@@ -31,6 +35,42 @@ function ensureAdminCanAccessReport(req: AuthRequest, report: any) {
     throw new AppError('Forbidden: you do not manage this turf report', 403)
   }
 }
+
+// GET /api/v1/admin/users/search?phone={phoneNumber}
+export const searchUserByPhoneHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
+  const { phone } = req.query
+
+  // Check if phone parameter exists
+  if (!phone || typeof phone !== 'string') {
+    throw new AppError('Phone parameter is required', 400)
+  }
+
+  // Validate phone format: exactly 11 digits
+  const phoneRegex = /^\d{11}$/
+  if (!phoneRegex.test(phone)) {
+    throw new AppError('Phone must be exactly 11 digits', 400)
+  }
+
+  // Search for user by phone number
+  const user = await User.findOne({ phone }).select('-password -passwordResetToken -passwordResetExpires')
+
+  if (!user) {
+    return res.status(404).json({
+      message: 'User not found',
+      data: null,
+    })
+  }
+
+  res.status(200).json({
+    message: 'User found',
+    data: {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+    },
+  })
+})
 
 // POST /api/v1/users/admin
 export const createAdminHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
@@ -93,6 +133,7 @@ export const getAdminDashboardHandler = asyncHandler(async (req: AuthRequest, re
   }
   else {
     // otherwise, get stats only for the turfs this admin manages
+    // This includes both role 'admin' and role 'user' who are turf admins
     const adminId = req.user!.id
     stats = await getAdminDashboardStats(adminId)
   }
@@ -193,7 +234,7 @@ export const getAdminBookingsHandler = asyncHandler(async (req: AuthRequest, res
     turfIds = allTurfs.map(turf => turf._id.toString())
   }
   else {
-    // Admin can only see their turf bookings
+    // Turf admin (role 'admin' or 'user' who is in turf.admins) can only see their turf bookings
     const adminTurfs = await Turf.find({ admins: req.user!.id }).select('_id').lean<{ _id: Types.ObjectId }[]>()
     turfIds = adminTurfs.map(turf => turf._id.toString())
 
@@ -219,13 +260,44 @@ export const getAdminBookingsHandler = asyncHandler(async (req: AuthRequest, res
 
   // Populate the results
   const populatedData = await Booking.populate(result.data, [
-    { path: 'user', select: 'name email phone' },
+    { path: 'user', select: 'name email' },
     { path: 'turf', select: 'name location' },
+    { path: 'facility', select: 'name' },
   ])
+
+  // Transform response to include only specified fields
+  const transformedData = populatedData.map((booking: any) => ({
+    _id: booking._id,
+    user: {
+      name: booking.user?.name,
+      email: booking.user?.email,
+    },
+    turf: {
+      name: booking.turf?.name,
+      location: {
+        address: booking.turf?.location?.address,
+        city: booking.turf?.location?.city,
+      },
+    },
+    facility: booking.facility ? {
+      name: booking.facility.name,
+    } : null,
+    date: booking.date,
+    startTime: booking.startTime,
+    endTime: booking.endTime,
+    totalPrice: booking.totalPrice,
+    paidAmount: booking.paidAmount,
+    dayType: booking.dayType,
+    status: booking.status,
+    paymentStatus: booking.paymentStatus,
+    transactionId: booking.transactionId,
+    lastDigit: booking.lastDigit,
+    createdAt: booking.createdAt,
+  }))
 
   res.status(200).json({
     message: 'Bookings retrieved successfully.',
-    data: populatedData,
+    data: transformedData,
     meta: result.meta,
   })
 })
@@ -233,11 +305,30 @@ export const getAdminBookingsHandler = asyncHandler(async (req: AuthRequest, res
 // NEW: POST /api/v1/admin/bookings - Create booking (for walk-ins, phone bookings)
 export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const validatedInput = createAdminManualBookingSchema.parse(req.body)
-  const { userId } = validatedInput // Admin can book for specific user
+  const { userId, userPhone, firstName, lastName, email } = validatedInput
 
   const turf = await findTurfById(validatedInput.turf)
   if (!turf) {
     throw new AppError('Turf not found', 404)
+  }
+
+  // Validate facility exists and belongs to turf
+  const facility = await Facility.findById(validatedInput.facility)
+  if (!facility) {
+    throw new AppError('Facility not found', 404)
+  }
+
+  if (facility.turf.toString() !== validatedInput.turf) {
+    throw new AppError('Facility does not belong to this turf', 400)
+  }
+
+  if (!facility.isActive) {
+    throw new AppError('Facility is not active', 400)
+  }
+
+  // Validate facility has pricingRules (required)
+  if (!facility.pricingRules || !Array.isArray(facility.pricingRules) || facility.pricingRules.length === 0) {
+    throw new AppError('Facility must have pricing rules configured', 400)
   }
 
   // Check admin permissions for this turf
@@ -246,11 +337,72 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
     throw new AppError('Forbidden: you do not manage this turf', 403)
   }
 
-  // Check if user exists (if booking for someone else)
+  // User lookup/creation logic
+  let bookingUser
+
+  // Backward compatibility: if userId is provided, use it
   if (userId) {
-    const user = await User.findById(userId)
-    if (!user) {
+    bookingUser = await User.findById(userId)
+    if (!bookingUser) {
       throw new AppError('User not found', 404)
+    }
+  }
+  // New logic: lookup user by phone
+  else if (userPhone) {
+    // Search for existing user by phone
+    bookingUser = await User.findOne({ phone: userPhone })
+
+    // If user not found, create new user
+    if (!bookingUser) {
+      // Validate that firstName, lastName, and email are provided
+      if (!firstName || !lastName || !email) {
+        throw new AppError('User not found. firstName, lastName, and email are required to create a new user', 400)
+      }
+
+      // Check if email already exists
+      const existingUserByEmail = await User.findOne({ email: email.toLowerCase().trim() })
+      if (existingUserByEmail) {
+        throw new AppError('A user with this email already exists', 409)
+      }
+
+      // Generate a random password for the new user
+      // Password will be hashed automatically by the pre-save hook
+      const randomPassword = crypto.randomBytes(16).toString('hex')
+
+      // Combine firstName and lastName into full name
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim()
+
+      // Create new user
+      bookingUser = await User.create({
+        name: fullName,
+        email: email.toLowerCase().trim(),
+        phone: userPhone,
+        password: randomPassword, // Will be hashed by pre-save hook
+        role: 'user',
+        isActive: true,
+        isVerified: false,
+        // TODO: When reactivating emails, consider sending welcome email here immediately
+        // TODO: When reactivating emails, remove these flags or set welcomeEmailSent: true if email sent
+        createdViaManualBooking: true, // Track that user was created via manual booking
+        welcomeEmailSent: false, // Will be sent later when emails are enabled
+      })
+
+      // TODO: When reactivating emails, uncomment and implement welcome email sending:
+      // try {
+      //   const resetToken = bookingUser.createPasswordResetToken()
+      //   await bookingUser.save({ validateBeforeSave: false })
+      //   await sendWelcomeEmail(bookingUser)
+      // } catch (emailError) {
+      //   logger.error('Failed to send welcome email during manual booking', { error: emailError })
+      //   // Don't fail booking creation if email fails
+      // }
+    }
+  }
+  else {
+    // Fallback to admin themselves if no user specified
+    bookingUser = await User.findById(req.user!.id)
+    if (!bookingUser) {
+      throw new AppError('Admin user not found', 404)
     }
   }
 
@@ -261,12 +413,61 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
     return hours * 60 + minutes
   }
 
-  const newBookingStart = timeToMinutes(validatedInput.startTime)
-  const newBookingEnd = timeToMinutes(validatedInput.endTime)
+  // Helper function to check if two time ranges overlap (handles midnight-spanning slots)
+  const doTimeRangesOverlap = (
+    start1: string,
+    end1: string,
+    start2: string,
+    end2: string,
+  ): boolean => {
+    const start1Minutes = timeToMinutes(start1)
+    const end1Minutes = timeToMinutes(end1)
+    const start2Minutes = timeToMinutes(start2)
+    const end2Minutes = timeToMinutes(end2)
+
+    const range1SpansMidnight = end1Minutes < start1Minutes
+    const range2SpansMidnight = end2Minutes < start2Minutes
+
+    // If both ranges span midnight, they always overlap (simplified check)
+    if (range1SpansMidnight && range2SpansMidnight) {
+      return true
+    }
+
+    // If range1 spans midnight
+    if (range1SpansMidnight) {
+      // Range1: [start1, 24:00) U [00:00, end1)
+      // Check if range2 overlaps with either part
+      return (
+        (start2Minutes >= start1Minutes && start2Minutes < 24 * 60) || // Overlaps with first part
+        (end2Minutes > start1Minutes && end2Minutes <= 24 * 60) || // Overlaps with first part
+        (start2Minutes >= 0 && start2Minutes < end1Minutes) || // Overlaps with second part
+        (end2Minutes > 0 && end2Minutes <= end1Minutes) || // Overlaps with second part
+        (start2Minutes < end1Minutes && end2Minutes > start1Minutes) // Spans across both parts
+      )
+    }
+
+    // If range2 spans midnight
+    if (range2SpansMidnight) {
+      // Range2: [start2, 24:00) U [00:00, end2)
+      // Check if range1 overlaps with either part
+      return (
+        (start1Minutes >= start2Minutes && start1Minutes < 24 * 60) || // Overlaps with first part
+        (end1Minutes > start2Minutes && end1Minutes <= 24 * 60) || // Overlaps with first part
+        (start1Minutes >= 0 && start1Minutes < end2Minutes) || // Overlaps with second part
+        (end1Minutes > 0 && end1Minutes <= end2Minutes) || // Overlaps with second part
+        (start1Minutes < end2Minutes && end1Minutes > start2Minutes) // Spans across both parts
+      )
+    }
+
+    // Both ranges are same-day: standard overlap check
+    // Overlap occurs if: range1 starts before range2 ends AND range1 ends after range2 starts
+    return start1Minutes < end2Minutes && end1Minutes > start2Minutes
+  }
 
   const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000)
   const potentialConflicts = await Booking.find({
     turf: validatedInput.turf,
+    facility: validatedInput.facility, // Filter by facility
     date: validatedInput.date,
     $or: [
       { status: 'confirmed' },
@@ -278,33 +479,77 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
   }).select('startTime endTime status createdAt')
 
   for (const booking of potentialConflicts) {
-    const existingStart = timeToMinutes(booking.startTime)
-    const existingEnd = timeToMinutes(booking.endTime)
-
-    // Overlap occurs if: new booking starts before existing ends AND new booking ends after existing starts
-    if (newBookingStart < existingEnd && newBookingEnd > existingStart) {
+    // Use overlap function that handles midnight-spanning slots
+    if (doTimeRangesOverlap(
+      validatedInput.startTime,
+      validatedInput.endTime,
+      booking.startTime,
+      booking.endTime,
+    )) {
       throw new AppError('This time slot is already booked or temporarily reserved', 409)
     }
   }
 
-  // Calculate pricing
-  const pricingDetails = calculateBookingPrice(turf, validatedInput.date, validatedInput.startTime, validatedInput.endTime)
+  // Helper function to determine day type
+  const getDayType = (date: Date): 'sunday-thursday' | 'friday-saturday' => {
+    const dayOfWeek = date.getDay() // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+    // Friday (5) and Saturday (6) are considered weekends
+    return (dayOfWeek === 5 || dayOfWeek === 6) ? 'friday-saturday' : 'sunday-thursday'
+  }
+
+  // Helper function to calculate duration in hours
+  const calculateDurationInHours = (startTime: string, endTime: string): number => {
+    const start = new Date(`1970-01-01T${startTime}:00`)
+    const end = new Date(`1970-01-01T${endTime}:00`)
+    const diffMilliseconds = end.getTime() - start.getTime()
+    return Math.round((diffMilliseconds / (1000 * 60 * 60)) * 100) / 100
+  }
+
+  // Calculate pricing - check if totalPayment override is provided
+  let pricingDetails
+  const { totalPayment } = validatedInput
+
+  if (totalPayment !== undefined && totalPayment !== null) {
+    // Override mode: use provided totalPayment
+    const dayType = getDayType(validatedInput.date)
+    const durationInHours = calculateDurationInHours(validatedInput.startTime, validatedInput.endTime)
+    
+    pricingDetails = {
+      pricePerSlot: 0,
+      totalPrice: totalPayment,
+      appliedRule: 'manual-override',
+      dayType,
+      durationInHours,
+    }
+  } else {
+    // Normal mode: calculate pricing using facility pricing only (no turf fallback)
+    pricingDetails = calculateFacilityPrice(facility, validatedInput.date, validatedInput.startTime, validatedInput.endTime)
+  }
 
   // Admin manual bookings are immediately confirmed and marked manual
   const bookingData = {
     ...validatedInput,
-    user: userId || req.user!.id, // Book for specified user or admin themselves
+    user: bookingUser._id, // Use the found or created user
+    facility: validatedInput.facility, // Include facility
     appliedPricePerSlot: pricingDetails.pricePerSlot,
     totalPrice: pricingDetails.totalPrice,
     pricingRule: pricingDetails.appliedRule,
     dayType: pricingDetails.dayType,
     status: 'confirmed',
     paymentStatus: 'paid', // Mark as paid for manual offline bookings
+    paidAmount: validatedInput.paidAmount,
     isManual: true,
     createdBy: 'admin',
     createdByAdmin: req.user!.id,
     expiresAt: undefined, // No expiration for confirmed bookings
   } as any
+
+  // Remove fields that shouldn't be stored in booking
+  delete bookingData.userId
+  delete bookingData.userPhone
+  delete bookingData.firstName
+  delete bookingData.lastName
+  delete bookingData.email
 
   const newBooking = await createBooking(bookingData)
 
@@ -466,8 +711,10 @@ export const getReportsHandler = asyncHandler(async (req: AuthRequest, res: Resp
 
   let turfIds: string[] | undefined
 
-  if (req.user?.role === 'admin') {
-    const adminTurfs = await Turf.find({ admins: req.user.id }).select('_id').lean<{ _id: Types.ObjectId }[]>()
+  // If user is not a manager, filter reports to only their turfs
+  // This includes both role 'admin' and role 'user' who are turf admins
+  if (req.user?.role !== 'manager') {
+    const adminTurfs = await Turf.find({ admins: req.user!.id }).select('_id').lean<{ _id: Types.ObjectId }[]>()
     turfIds = adminTurfs.map(turf => turf._id.toString())
 
     if (turfIds.length === 0) {
@@ -618,3 +865,4 @@ export const deleteReportHandler = asyncHandler(async (req: AuthRequest, res: Re
     data: existingReport,
   })
 })
+

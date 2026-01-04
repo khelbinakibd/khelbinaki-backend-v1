@@ -1,10 +1,11 @@
 import type { Response } from 'express'
 import type { AuthRequest } from '../middlewares/authMiddleware'
 import { Booking } from '../models/Booking'
+import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
 import { createBookingSchema, updateBookingStatusSchema } from '../schemas/bookingSchema'
 import { createBooking, findBookingById, findBookingByUser, getTurfAvailability, updateBookingStatus } from '../services/bookingServices'
-import { calculateBookingPrice } from '../services/turfPricingService'
+import { calculateFacilityPrice } from '../services/facilityPricingService'
 import AppError from '../utils/AppError'
 import asyncHandler from '../utils/asyncHandler'
 
@@ -18,29 +19,99 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
     throw new AppError('Turf not found', 404)
   }
 
-  // Helper function to check if two time ranges overlap
+  // Validate facility exists and belongs to turf
+  const facility = await Facility.findById(validatedInput.facility)
+  if (!facility) {
+    throw new AppError('Facility not found', 404)
+  }
+
+  if (facility.turf.toString() !== validatedInput.turf) {
+    throw new AppError('Facility does not belong to this turf', 400)
+  }
+
+  if (!facility.isActive) {
+    throw new AppError('Facility is not active', 400)
+  }
+
+  // Validate facility has pricingRules (required)
+  if (!facility.pricingRules || !Array.isArray(facility.pricingRules) || facility.pricingRules.length === 0) {
+    throw new AppError('Facility must have pricing rules configured', 400)
+  }
+
+  // Helper function to convert HH:mm to minutes since midnight
   const timeToMinutes = (timeString: string): number => {
     const [hours, minutes] = timeString.split(':').map(Number)
     return hours * 60 + minutes
   }
 
-  const newBookingStart = timeToMinutes(validatedInput.startTime)
-  const newBookingEnd = timeToMinutes(validatedInput.endTime)
+  // Helper function to check if two time ranges overlap (handles midnight-spanning slots)
+  const doTimeRangesOverlap = (
+    start1: string,
+    end1: string,
+    start2: string,
+    end2: string,
+  ): boolean => {
+    const start1Minutes = timeToMinutes(start1)
+    const end1Minutes = timeToMinutes(end1)
+    const start2Minutes = timeToMinutes(start2)
+    const end2Minutes = timeToMinutes(end2)
+
+    const range1SpansMidnight = end1Minutes < start1Minutes
+    const range2SpansMidnight = end2Minutes < start2Minutes
+
+    // If both ranges span midnight, they always overlap (simplified check)
+    if (range1SpansMidnight && range2SpansMidnight) {
+      return true
+    }
+
+    // If range1 spans midnight
+    if (range1SpansMidnight) {
+      // Range1: [start1, 24:00) U [00:00, end1)
+      // Check if range2 overlaps with either part
+      return (
+        (start2Minutes >= start1Minutes && start2Minutes < 24 * 60) || // Overlaps with first part
+        (end2Minutes > start1Minutes && end2Minutes <= 24 * 60) || // Overlaps with first part
+        (start2Minutes >= 0 && start2Minutes < end1Minutes) || // Overlaps with second part
+        (end2Minutes > 0 && end2Minutes <= end1Minutes) || // Overlaps with second part
+        (start2Minutes < end1Minutes && end2Minutes > start1Minutes) // Spans across both parts
+      )
+    }
+
+    // If range2 spans midnight
+    if (range2SpansMidnight) {
+      // Range2: [start2, 24:00) U [00:00, end2)
+      // Check if range1 overlaps with either part
+      return (
+        (start1Minutes >= start2Minutes && start1Minutes < 24 * 60) || // Overlaps with first part
+        (end1Minutes > start2Minutes && end1Minutes <= 24 * 60) || // Overlaps with first part
+        (start1Minutes >= 0 && start1Minutes < end2Minutes) || // Overlaps with second part
+        (end1Minutes > 0 && end1Minutes <= end2Minutes) || // Overlaps with second part
+        (start1Minutes < end2Minutes && end1Minutes > start2Minutes) // Spans across both parts
+      )
+    }
+
+    // Both ranges are same-day: standard overlap check
+    // Overlap occurs if: range1 starts before range2 ends AND range1 ends after range2 starts
+    return start1Minutes < end2Minutes && end1Minutes > start2Minutes
+  }
 
   // Check for any conflicting confirmed or pending (awaiting approval) bookings
-  // Must check if the entire time range overlaps with existing bookings
+  // Must check if the entire time range overlaps with existing bookings (filtered by facility)
   const potentialConflicts = await Booking.find({
     turf: validatedInput.turf,
+    facility: validatedInput.facility, // Filter by facility
     date: validatedInput.date,
     status: { $in: ['confirmed', 'pending'] }, // Check both confirmed and pending
   }).select('startTime endTime status')
 
   for (const booking of potentialConflicts) {
-    const existingStart = timeToMinutes(booking.startTime)
-    const existingEnd = timeToMinutes(booking.endTime)
-
-    // Overlap occurs if: new booking starts before existing ends AND new booking ends after existing starts
-    if (newBookingStart < existingEnd && newBookingEnd > existingStart) {
+    // Use overlap function that handles midnight-spanning slots
+    if (doTimeRangesOverlap(
+      validatedInput.startTime,
+      validatedInput.endTime,
+      booking.startTime,
+      booking.endTime,
+    )) {
       const message = booking.status === 'confirmed'
         ? 'This time slot is already booked and confirmed'
         : 'This time slot is pending approval. Please try another slot.'
@@ -48,9 +119,9 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
     }
   }
 
-  // Calculate the price using the pricing service
-  const pricingDetails = calculateBookingPrice(
-    turf,
+  // Calculate the price using facility pricing service (facility-only, no turf fallback)
+  const pricingDetails = calculateFacilityPrice(
+    facility,
     validatedInput.date,
     validatedInput.startTime,
     validatedInput.endTime,
@@ -66,6 +137,7 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
   const newBookingData = {
     ...validatedInput,
     user: req.user!.id,
+    facility: validatedInput.facility,
     appliedPricePerSlot: pricingDetails.pricePerSlot,
     totalPrice: pricingDetails.totalPrice,
     pricingRule: pricingDetails.appliedRule,
@@ -123,16 +195,20 @@ export const getMyBookingDetailsHandler = asyncHandler(async (req: AuthRequest, 
   })
 })
 
-// Get turf availability handler - FIXED
+// Get turf availability handler - FIXED (now facility-specific)
 export const getTurfAvailabilityHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
-  const { date } = req.query
+  const { date, facility } = req.query
   const { id: turfId } = req.params
 
   if (!date || typeof date !== 'string') {
     throw new AppError('Date query parameter is required', 400)
   }
 
-  const availabilityData = await getTurfAvailability(turfId, new Date(date))
+  if (!facility || typeof facility !== 'string') {
+    throw new AppError('Facility query parameter is required', 400)
+  }
+
+  const availabilityData = await getTurfAvailability(turfId, new Date(date), facility)
 
   res.status(200).json({
     message: 'Turf availability retrieved successfully.',

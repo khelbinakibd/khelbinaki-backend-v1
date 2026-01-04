@@ -56,6 +56,22 @@ if (env.EMAIL_SERVICE === 'nodemailer' || !env.EMAIL_SERVICE) {
  * Enhanced with comprehensive logging for production debugging
  */
 export async function sendEmail(options: MailOptions) {
+  // TODO: When reactivating emails, review this check - ensure EMAIL_ENABLED=true is set
+  // TODO: Consider removing this check entirely if emails should always be enabled
+  if (!env.EMAIL_ENABLED) {
+    logger.info('📧 Email sending disabled (EMAIL_ENABLED=false). Email would have been sent:', {
+      to: options.to,
+      subject: options.subject,
+    })
+    // Return success response to prevent errors in calling code
+    return {
+      success: true,
+      messageId: 'disabled',
+      service: 'disabled',
+      skipped: true,
+    }
+  }
+
   const from = options.from || env.EMAIL_FROM
   const emailService = env.EMAIL_SERVICE || 'nodemailer'
 

@@ -14,7 +14,9 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "type-check": "tsc --noEmit",
-    "generate-secrets": "bash scripts/generate-secrets.sh"
+    "generate-secrets": "bash scripts/generate-secrets.sh",
+    "migrate:facilities": "tsx scripts/migrate-bookings-to-facilities.ts",
+    "send-welcome-emails": "tsx scripts/send-welcome-emails-to-existing-users.ts"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
