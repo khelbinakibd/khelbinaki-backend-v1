@@ -39,7 +39,7 @@ const corsOptions = {
       env.CLIENT_URL,
       env.SERVER_URL,
       env.PUBLIC_URL,
-      'https://khelbinakibd.vercel.app',
+      'https://www.khelbinakibd.com',
       'http://localhost:5173',
 
     ].filter(Boolean)
