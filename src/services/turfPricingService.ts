@@ -76,7 +76,7 @@ export function calculateBookingPrice(
   const rules = Array.isArray(turf.pricingRules) ? turf.pricingRules : []
   const applicableSlot = findApplicableTimeSlot(rules, dayType, startTime)
 
-  const pricePerSlot = applicableSlot ? applicableSlot.pricePerSlot : turf.defaultPricePerSlot
+  const pricePerSlot = applicableSlot ? applicableSlot.pricePerSlot : (turf.defaultPricePerSlot ?? 0)
   const totalPrice = pricePerSlot * durationInHours
 
   return {

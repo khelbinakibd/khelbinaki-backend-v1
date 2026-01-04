@@ -24,7 +24,7 @@ export const getFacilitiesByTurfHandler = asyncHandler(async (req: Request, res:
     throw new AppError('Turf not found', 404)
   }
 
-  const activeOnlyBool = activeOnly === 'true' || activeOnly === true
+  const activeOnlyBool = activeOnly === 'true' || (typeof activeOnly === 'boolean' && activeOnly === true)
   const facilities = await findFacilitiesByTurf(turfId, activeOnlyBool)
 
   res.status(200).json({
@@ -132,7 +132,7 @@ export const deleteFacilityHandler = asyncHandler(async (req: AuthRequest, res: 
     throw new AppError('Forbidden: you do not manage this turf', 403)
   }
 
-  const hardDeleteBool = hardDelete === 'true' || hardDelete === true
+  const hardDeleteBool = hardDelete === 'true' || (typeof hardDelete === 'boolean' && hardDelete === true)
   await deleteFacility(facilityId, hardDeleteBool)
 
   res.status(200).json({

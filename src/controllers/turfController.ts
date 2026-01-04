@@ -47,7 +47,8 @@ export const createTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
   }
 
   // Extract facilities from validate (if provided)
-  const { facilities, pricingRules, defaultPricePerSlot, ...turfDataWithoutFacilities } = validate
+  // Note: pricingRules and defaultPricePerSlot are no longer in the schema (removed when pricing moved to facility level)
+  const { facilities, ...turfDataWithoutFacilities } = validate
 
   // Create turf data with properly formatted admin IDs
   // Note: pricingRules and defaultPricePerSlot are removed - all pricing is now at facility level
@@ -63,7 +64,7 @@ export const createTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
     const createdFacilities = []
     for (const facilityData of facilities) {
       try {
-        const facility = await createFacility(turf._id.toString(), facilityData)
+        const facility = await createFacility((turf._id as mongoose.Types.ObjectId).toString(), facilityData)
         createdFacilities.push(facility)
       }
       catch (error: any) {
@@ -72,7 +73,7 @@ export const createTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
       }
     }
     // Populate facilities in response
-    const turfWithFacilities = await findTurfById(turf._id.toString())
+    const turfWithFacilities = await findTurfById((turf._id as mongoose.Types.ObjectId).toString())
     res.status(201).json({
       message: 'Turf created successfully',
       data: turfWithFacilities,
@@ -116,7 +117,7 @@ export const getTurfFlexibleHandler = asyncHandler(async (req: Request | AuthReq
   if ('user' in req && req.user) {
     const authReq = req as AuthRequest
     // If user is not a manager, check if they are admin of this turf
-    if (authReq.user.role !== 'manager') {
+    if (authReq.user && authReq.user.role !== 'manager') {
       const isAdminForThisTurf = turf.admins.some(
         adminId => adminId.toString() === authReq.user!.id,
       )
@@ -186,7 +187,8 @@ export const updateTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
   }
 
   // Extract facilities from validate (if provided)
-  const { facilities, pricingRules, defaultPricePerSlot, ...turfDataWithoutFacilities } = validate
+  // Note: pricingRules and defaultPricePerSlot are no longer in the schema (removed when pricing moved to facility level)
+  const { facilities, ...turfDataWithoutFacilities } = validate
 
   // Update turf
   // Note: pricingRules and defaultPricePerSlot are removed - all pricing is now at facility level
@@ -241,7 +243,7 @@ export const updateTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
     // Get existing facilities for this turf
     const existingFacilities = await Facility.find({ turf: turfId })
     const existingFacilityMap = new Map(
-      existingFacilities.map(f => [f._id.toString(), f]),
+      existingFacilities.map(f => [(f._id as mongoose.Types.ObjectId).toString(), f]),
     )
 
     // Separate facilities into new, existing, and to-delete
@@ -265,7 +267,7 @@ export const updateTurfHandler = asyncHandler(async (req: AuthRequest, res: Resp
 
     // Identify facilities to delete (soft delete)
     const facilitiesToDelete = existingFacilities.filter(
-      f => !facilityIdsInRequest.has(f._id.toString()),
+      f => !facilityIdsInRequest.has((f._id as mongoose.Types.ObjectId).toString()),
     )
 
     // Perform operations
