@@ -184,6 +184,10 @@ export const updateUserHandler = asyncHandler(async (req: AuthRequest, res: Resp
 export const uploadTurfImageHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id: turfId } = req.params
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:185',message:'Image upload handler entry',data:{turfId,hasFile:!!req.file,userId:req.user?.id,userRole:req.user?.role},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
   console.log('📸 Image upload request for turf:', turfId)
   console.log('📸 File received:', req.file ? 'Yes' : 'No')
 
@@ -191,29 +195,82 @@ export const uploadTurfImageHandler = asyncHandler(async (req: AuthRequest, res:
     throw new AppError('No image file provided', 400)
   }
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:194',message:'Before findTurfById',data:{turfId,fileSize:req.file.size,fileMimetype:req.file.mimetype},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+  // #endregion
+
   const turf = await findTurfById(turfId)
   if (!turf) {
     console.error('❌ Turf not found:', turfId)
     throw new AppError('Turf not found.', 404)
   }
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:200',message:'Turf found, checking admins structure',data:{turfName:turf.name,adminsType:Array.isArray(turf.admins)?turf.admins.length:'not-array',firstAdminType:turf.admins?.[0]?typeof turf.admins[0]:'no-admins',firstAdminHasEquals:typeof turf.admins?.[0]?.equals,firstAdminId:turf.admins?.[0]?._id?.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
   console.log('✅ Turf found:', turf.name)
 
   // Authorization check
-  const isAdminForThisTurf = turf.admins.some(adminId => adminId.equals(req.user!.id))
-  if (req.user?.role !== 'manager' && !isAdminForThisTurf) {
-    throw new AppError('Forbidden: you do not manage this turf.', 403)
+  // Note: findTurfById returns lean objects with populated admins, so admins are plain objects with _id, not ObjectIds
+  try {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:203',message:'Before authorization check',data:{userId:req.user!.id,adminsCount:turf.admins?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+
+    const isAdminForThisTurf = turf.admins.some((admin: any) => {
+      // Handle both ObjectId and populated plain object cases
+      const adminId = admin._id ? admin._id.toString() : admin.toString()
+      return adminId === req.user!.id
+    })
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:203',message:'Authorization check result',data:{isAdminForThisTurf,userRole:req.user?.role},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+
+    if (req.user?.role !== 'manager' && !isAdminForThisTurf) {
+      throw new AppError('Forbidden: you do not manage this turf.', 403)
+    }
+  } catch (error: any) {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:203',message:'Authorization check error',data:{errorMessage:error.message,errorName:error.name,errorStack:error.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    throw error
   }
 
   console.log('📤 Uploading to Cloudinary...')
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:211',message:'Before Cloudinary upload',data:{fileSize:req.file.size,hasBuffer:!!req.file.buffer,bufferLength:req.file.buffer?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+
   // Upload the file to Cloudinary in a 'turfs' folder
-  const imageUrl = await uploadToCloudinary(req.file, 'turfs')
+  let imageUrl: string
+  try {
+    imageUrl = await uploadToCloudinary(req.file, 'turfs')
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:211',message:'Cloudinary upload success',data:{imageUrl},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+  } catch (error: any) {
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:211',message:'Cloudinary upload error',data:{errorMessage:error.message,errorName:error.name,errorStack:error.stack?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
+    throw error
+  }
 
   console.log('✅ Image uploaded:', imageUrl)
 
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:216',message:'Before updateTurf',data:{turfId,imageUrl},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+  // #endregion
+
   // Add the new image URL to the turf's images array
   const updatedTurf = await updateTurf(turfId, { $push: { images: imageUrl } })
+
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'adminController.ts:216',message:'updateTurf success',data:{updatedTurfId:updatedTurf?._id?.toString()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+  // #endregion
 
   console.log('✅ Turf updated with new image')
 

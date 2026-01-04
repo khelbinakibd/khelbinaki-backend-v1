@@ -38,15 +38,30 @@ export const upload = multer({
  */
 
 export async function uploadToCloudinary(file: Express.Multer.File, folder: string): Promise<string> {
+  // #region agent log
+  fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'uploadService.ts:40',message:'uploadToCloudinary entry',data:{folder,hasFile:!!file,hasBuffer:!!file?.buffer,bufferLength:file?.buffer?.length,cloudName:process.env.CLOUDINARY_CLOUD_NAME,hasApiKey:!!process.env.CLOUDINARY_API_KEY,hasApiSecret:!!process.env.CLOUDINARY_API_SECRET},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+
   return new Promise((resolve, reject) => {
   // Cloudinary's uploader expects a stream, so we create one from the buffer
     const stream = cloudinary.uploader.upload_stream({ folder }, (error, result) => {
       if (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'uploadService.ts:44',message:'Cloudinary upload error',data:{errorMessage:error.message,errorHttpCode:error.http_code,errorName:error.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         logger.error('Cloudinary upload error', { error })
         return reject(new AppError('Failed to upload image.', 500))
       }
       if (result) {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'uploadService.ts:48',message:'Cloudinary upload success',data:{secureUrl:result.secure_url},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         resolve(result.secure_url)
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/8fbd04cc-7df6-4810-b434-f22cccd6f5f0',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'uploadService.ts:48',message:'Cloudinary upload no result',data:{},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        reject(new AppError('Failed to upload image: No result from Cloudinary.', 500))
       }
     })
 
