@@ -87,11 +87,24 @@ export function errorHandler(err: unknown, req: Request, res: Response, _next: N
 
   // MongoDB duplicate key error
   if ((err as any).code === 11000) {
-    const field = Object.keys((err as any).keyPattern)[0]
+    const indexName = (err as any).message?.match(/index: ([^\s]+) dup key/)?.[1]
+
+    if (indexName === 'uniq_active_booking_slot') {
+      return res.status(409).json({
+        success: false,
+        errorId,
+        message: 'This time slot is already booked.',
+      })
+    }
+
+    const field = Object.keys((err as any).keyPattern ?? {})[0]
+
     return res.status(409).json({
       success: false,
       errorId,
-      message: `Duplicate value for field: ${field}`,
+      message: field
+        ? `Duplicate value for field: ${field}`
+        : 'Duplicate value detected.',
     })
   }
 
