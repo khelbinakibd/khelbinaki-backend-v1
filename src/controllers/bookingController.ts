@@ -8,10 +8,12 @@ import { createBooking, findBookingById, findBookingByUser, getTurfAvailability,
 import { calculateFacilityPrice } from '../services/facilityPricingService'
 import AppError from '../utils/AppError'
 import asyncHandler from '../utils/asyncHandler'
+import { dhakaDateStart, getDhakaDayRange, isValidDateKey } from '../utils/businessTime'
 
 // Creating booking handler - COMPLETELY FIXED for manual payment
 export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const validatedInput = createBookingSchema.parse(req.body)
+  const dateKey = validatedInput.date
 
   // Find the turf to get its pricing rules
   const turf = await Turf.findById(validatedInput.turf)
@@ -97,10 +99,14 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
 
   // Check for any conflicting confirmed or pending (awaiting approval) bookings
   // Must check if the entire time range overlaps with existing bookings (filtered by facility)
+  const { start, endExclusive } = getDhakaDayRange(dateKey)
   const potentialConflicts = await Booking.find({
     turf: validatedInput.turf,
     facility: validatedInput.facility, // Filter by facility
-    date: validatedInput.date,
+    date: {
+      $gte: start,
+      $lt: endExclusive,
+    },
     status: { $in: ['confirmed', 'pending'] }, // Check both confirmed and pending
   }).select('startTime endTime status')
 
@@ -122,7 +128,7 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
   // Calculate the price using facility pricing service (facility-only, no turf fallback)
   const pricingDetails = calculateFacilityPrice(
     facility,
-    validatedInput.date,
+    dateKey,
     validatedInput.startTime,
     validatedInput.endTime,
   )
@@ -138,6 +144,7 @@ export const createBookingHandler = asyncHandler(async (req: AuthRequest, res: R
     ...validatedInput,
     user: req.user!.id,
     facility: validatedInput.facility,
+    date: dhakaDateStart(dateKey),
     appliedPricePerSlot: pricingDetails.pricePerSlot,
     totalPrice: pricingDetails.totalPrice,
     pricingRule: pricingDetails.appliedRule,
@@ -204,11 +211,15 @@ export const getTurfAvailabilityHandler = asyncHandler(async (req: AuthRequest, 
     throw new AppError('Date query parameter is required', 400)
   }
 
+  if (!isValidDateKey(date)) {
+    throw new AppError('Invalid date query parameter; expected YYYY-MM-DD', 400)
+  }
+
   if (!facility || typeof facility !== 'string') {
     throw new AppError('Facility query parameter is required', 400)
   }
 
-  const availabilityData = await getTurfAvailability(turfId, new Date(date), facility)
+  const availabilityData = await getTurfAvailability(turfId, date, facility)
 
   res.status(200).json({
     message: 'Turf availability retrieved successfully.',

@@ -1,6 +1,7 @@
 import type { IFacility } from '../models/Facility'
-import type { IPricingRule, ITurf } from '../models/Turf'
-import { calculateBookingPrice, type PricingCalculationResult } from './turfPricingService'
+import type { IPricingRule } from '../models/Turf'
+import { getDhakaWeekday, timeToMinutes } from '../utils/businessTime'
+import type { PricingCalculationResult } from './turfPricingService'
 
 // Helper function to check if a time falls within a time slot (handles midnight-spanning slots)
 function isTimeInSlot(time: string, slotStartTime: string, slotEndTime: string): boolean {
@@ -17,12 +18,6 @@ function isTimeInSlot(time: string, slotStartTime: string, slotEndTime: string):
     // Normal same-day slot: time is valid if it's >= startTime AND < endTime
     return timeMinutes >= startMinutes && timeMinutes < endMinutes
   }
-}
-
-// Helper function to convert HH:mm to minutes since midnight
-function timeToMinutes(timeString: string): number {
-  const [hours, minutes] = timeString.split(':').map(Number)
-  return hours * 60 + minutes
 }
 
 // Finds the applicable pricing rule for a given day type and start time (for facilities)
@@ -79,8 +74,8 @@ function calculateDurationInHours(startTime: string, endTime: string): number {
 }
 
 // Determine the day type for pricing based on the day of the week
-function getDayType(date: Date): 'sunday-thursday' | 'friday-saturday' {
-  const dayOfWeek = date.getDay() // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+function getDayType(dateKey: string): 'sunday-thursday' | 'friday-saturday' {
+  const dayOfWeek = getDhakaWeekday(dateKey) // 0 = Sunday, ..., 6 = Saturday
 
   // Friday (5) and Saturday (6) are considered weekends
   return (dayOfWeek === 5 || dayOfWeek === 6) ? 'friday-saturday' : 'sunday-thursday'
@@ -93,11 +88,11 @@ function getDayType(date: Date): 'sunday-thursday' | 'friday-saturday' {
  */
 export function calculateFacilityPrice(
   facility: IFacility,
-  date: Date,
+  dateKey: string,
   startTime: string,
   endTime: string,
 ): PricingCalculationResult {
-  const dayType = getDayType(date)
+  const dayType = getDayType(dateKey)
   const durationInHours = calculateDurationInHours(startTime, endTime)
 
   // Validate facility has pricingRules
@@ -134,4 +129,3 @@ export function calculateFacilityPrice(
   // If no pricing rule matches and no default price, throw error
   throw new Error('No pricing rule found for the specified time slot and no default price configured')
 }
-
