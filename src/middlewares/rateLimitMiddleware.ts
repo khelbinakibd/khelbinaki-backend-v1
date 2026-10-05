@@ -13,3 +13,12 @@ export const apiRateLimit = rateLimit({
   max: 100,
   message: 'Too many requests, please try again later',
 })
+
+// Count invalid requests and empty results as well as successful matches.
+export const bookingLookupRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many booking lookup attempts. Please try again later.' },
+})
