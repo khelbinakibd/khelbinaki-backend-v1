@@ -2,8 +2,10 @@ import type { IBooking } from '../models/Booking'
 import { Booking } from '../models/Booking'
 import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
+import { User } from '../models/User'
+import { storedPhoneLookupFilter } from '../utils/phone'
 import AppError from '../utils/AppError'
-import { getDhakaDayRange, isDhakaSlotInPast, timeToMinutes } from '../utils/businessTime'
+import { getDhakaDateKey, getDhakaDayRange, isDhakaSlotInPast, timeToMinutes } from '../utils/businessTime'
 import { calculateFacilityPrice } from './facilityPricingService'
 
 // Creating booking service
@@ -206,4 +208,61 @@ export async function updateBookingStatus(bookingId: string, status: 'pending' |
     { new: true, runValidators: true },
   )
   return updatedBooking
+}
+
+export interface PublicBookingDTO {
+  bookingId: string
+  turfName: string | null
+  facilityName: string | null
+  venueLocation: { address?: string, city?: string } | null
+  date: string
+  startTime: string
+  endTime: string
+  status: IBooking['status']
+  paymentStatus: 'unpaid' | 'pending' | 'paid' | 'refunded'
+}
+
+interface LookupBookingRow {
+  _id: { toString: () => string }
+  turf: { name?: string, location?: { address?: string, city?: string } } | null
+  facility: { name?: string } | null
+  date: Date
+  startTime: string
+  endTime: string
+  status: IBooking['status']
+  paymentStatus: IBooking['paymentStatus']
+}
+
+export async function lookupBookingsByPhone(phone: string, page: number, limit: number) {
+  const users = await User.find(storedPhoneLookupFilter(phone)).select('_id').lean()
+  const filter = { user: { $in: users.map(user => user._id) } }
+  const [rows, totalItems] = users.length
+    ? await Promise.all([
+        Booking.find(filter)
+          .select('_id turf facility date startTime endTime status paymentStatus')
+          .populate('turf', 'name location.address location.city -_id')
+          .populate('facility', 'name -_id')
+          .sort({ createdAt: -1, _id: -1 })
+          .skip((page - 1) * limit).limit(limit).lean<LookupBookingRow[]>(),
+        Booking.countDocuments(filter),
+      ])
+    : [[], 0] as [LookupBookingRow[], number]
+
+  // Serialize only an explicit public allowlist, never the source documents.
+  const bookings: PublicBookingDTO[] = rows.map(row => ({
+    bookingId: row._id.toString(),
+    turfName: row.turf?.name ?? null,
+    facilityName: row.facility?.name ?? null,
+    venueLocation: row.turf?.location
+      ? { address: row.turf.location.address, city: row.turf.location.city }
+      : null,
+    date: getDhakaDateKey(row.date),
+    startTime: row.startTime,
+    endTime: row.endTime,
+    status: row.status,
+    paymentStatus: row.paymentStatus === 'pending_approval' ? 'pending' : row.paymentStatus,
+  }))
+  return { bookings, meta: {
+    totalItems, totalPage: Math.ceil(totalItems / limit), currentPage: page, itemsPerPage: limit,
+  } }
 }

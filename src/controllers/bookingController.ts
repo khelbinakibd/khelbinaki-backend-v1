@@ -3,8 +3,8 @@ import type { AuthRequest } from '../middlewares/authMiddleware'
 import { Booking } from '../models/Booking'
 import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
-import { createBookingSchema, updateBookingStatusSchema } from '../schemas/bookingSchema'
-import { createBooking, findBookingById, findBookingByUser, getTurfAvailability, updateBookingStatus } from '../services/bookingServices'
+import { createBookingSchema, lookupBookingPaginationSchema, lookupBookingSchema, updateBookingStatusSchema } from '../schemas/bookingSchema'
+import { createBooking, findBookingById, findBookingByUser, getTurfAvailability, lookupBookingsByPhone, updateBookingStatus } from '../services/bookingServices'
 import { calculateFacilityPrice } from '../services/facilityPricingService'
 import AppError from '../utils/AppError'
 import asyncHandler from '../utils/asyncHandler'
@@ -285,4 +285,10 @@ export const cancelMyBookingHandler = asyncHandler(async (req: AuthRequest, res:
     message: 'Booking cancelled successfully.',
     data: updatedBooking,
   })
+})
+
+export const lookupBookingsHandler = asyncHandler(async (req, res: Response) => {
+  const { phone } = lookupBookingSchema.parse(req.body)
+  const { page, limit } = lookupBookingPaginationSchema.parse(req.query)
+  res.status(200).json(await lookupBookingsByPhone(phone, page, limit))
 })

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { normalizeBangladeshPhone } from '../utils/phone'
 import { getDhakaDateKey, isDhakaSlotInPast, isValidDateKey, timeToMinutes } from '../utils/businessTime'
 
 const bookingTimePattern = /^([01]\d|2[0-3]):([0-5]\d)$/
@@ -100,4 +101,20 @@ export const createAdminManualBookingSchema = z.object({
       path: ['date'],
     })
   }
+})
+
+export const lookupBookingSchema = z.object({
+  phone: z.string().max(64).transform((phone, ctx) => {
+    const normalized = normalizeBangladeshPhone(phone)
+    if (normalized === null) {
+      ctx.addIssue({ code: 'custom', message: 'Invalid Bangladesh phone number' })
+      return z.NEVER
+    }
+    return normalized
+  }),
+})
+
+export const lookupBookingPaginationSchema = z.object({
+  page: z.coerce.number().int().min(1).max(1000).default(1),
+  limit: z.coerce.number().int().min(1).max(50).default(10),
 })
