@@ -3,6 +3,7 @@ import { Booking } from '../models/Booking'
 import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
 import AppError from '../utils/AppError'
+import { getDhakaDayRange, isDhakaSlotInPast, timeToMinutes } from '../utils/businessTime'
 import { calculateFacilityPrice } from './facilityPricingService'
 
 // Creating booking service
@@ -95,14 +96,17 @@ function isSlotOverlapWithBookings(
   return false
 }
 
-// Helper function to convert HH:mm to minutes since midnight
-function timeToMinutes(timeString: string): number {
-  const [hours, minutes] = timeString.split(':').map(Number)
-  return hours * 60 + minutes
+function minutesToTime(totalMinutes: number): string {
+  const minutesInDay = 24 * 60
+  const normalizedMinutes = ((totalMinutes % minutesInDay) + minutesInDay) % minutesInDay
+  const hours = Math.floor(normalizedMinutes / 60)
+  const minutes = normalizedMinutes % 60
+
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`
 }
 
 // Turf Availability service (now facility-specific)
-export async function getTurfAvailability(turfId: string, date: Date, facilityId: string) {
+export async function getTurfAvailability(turfId: string, dateKey: string, facilityId: string) {
   const turf = await Turf.findById(turfId)
   if (!turf) {
     throw new AppError('Turf not found', 404)
@@ -128,19 +132,15 @@ export async function getTurfAvailability(turfId: string, date: Date, facilityId
     throw new AppError('Facility must have pricing rules configured', 400)
   }
 
-  const startOfDay = new Date(date)
-  startOfDay.setHours(0, 0, 0, 0)
-
-  const endOfDay = new Date(date)
-  endOfDay.setHours(23, 59, 59, 999)
+  const { start, endExclusive } = getDhakaDayRange(dateKey)
 
   //  Get all bookings that make slots unavailable (filtered by facility)
   const unavailableBookings = await Booking.find({
     turf: turfId,
     facility: facilityId, // Filter by facility
     date: {
-      $gte: startOfDay,
-      $lt: endOfDay,
+      $gte: start,
+      $lt: endExclusive,
     },
     // A slot is unavailable if:
     // 1. Booking is confirmed (paid or unpaid)
@@ -157,20 +157,20 @@ export async function getTurfAvailability(turfId: string, date: Date, facilityId
   // Generate all possible 1-hour slots based on operating hours
   const availableSlots = []
   const { start: operatingStart, end: operatingEnd } = turf.operatingHours
+  const operatingStartMinutes = timeToMinutes(operatingStart)
+  let operatingEndMinutes = timeToMinutes(operatingEnd)
 
-  let currentTime = new Date(`${date.toISOString().split('T')[0]}T${operatingStart}:00`)
-  const endTime = new Date(`${date.toISOString().split('T')[0]}T${operatingEnd}:00`)
+  // Treat an earlier end time as an operating window that spans midnight.
+  if (operatingEndMinutes < operatingStartMinutes) {
+    operatingEndMinutes += 24 * 60
+  }
 
-  while (currentTime < endTime) {
-    const startTimeString = currentTime.toTimeString().substring(0, 5) // "HH:mm"
-
-    const nextHour = new Date(currentTime)
-    nextHour.setHours(nextHour.getHours() + 1)
-
-    const endTimeString = nextHour.toTimeString().substring(0, 5)
+  for (let currentMinutes = operatingStartMinutes; currentMinutes < operatingEndMinutes; currentMinutes += 60) {
+    const startTimeString = minutesToTime(currentMinutes)
+    const endTimeString = minutesToTime(currentMinutes + 60)
 
     // Calculate price for each slot using facility pricing (facility-only, no turf fallback)
-    const pricing = calculateFacilityPrice(facility, date, startTimeString, endTimeString)
+    const pricing = calculateFacilityPrice(facility, dateKey, startTimeString, endTimeString)
 
     // Check if this 1-hour slot overlaps with ANY existing booking range
     const hasOverlap = isSlotOverlapWithBookings(
@@ -178,20 +178,21 @@ export async function getTurfAvailability(turfId: string, date: Date, facilityId
       endTimeString,
       unavailableBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime })),
     )
+    const isTimePassed = isDhakaSlotInPast(dateKey, startTimeString)
 
     availableSlots.push({
       startTime: startTimeString,
       endTime: endTimeString,
-      isAvailable: !hasOverlap, // TRUE: slot is available, FALSE: overlaps with any booking
+      isAvailable: !hasOverlap && !isTimePassed,
+      isTimePassed,
       pricePerSlot: pricing.pricePerSlot,
       dayTypeLabel: pricing.dayType === 'friday-saturday' ? 'FRI-SAT' : 'SUN-THU',
     })
-    currentTime = nextHour
   }
 
-  const dayType = calculateFacilityPrice(facility, date, '00:00', '01:00').dayType
+  const dayType = calculateFacilityPrice(facility, dateKey, '00:00', '01:00').dayType
   return {
-    date: date.toISOString().split('T')[0],
+    date: dateKey,
     dayType,
     slots: availableSlots,
   }

@@ -18,6 +18,7 @@ import { uploadToCloudinary } from '../services/uploadService'
 import { updateUserById } from '../services/userServices'
 import AppError from '../utils/AppError'
 import asyncHandler from '../utils/asyncHandler'
+import { dhakaDateStart, getDhakaDayRange, getDhakaWeekday, timeToMinutes } from '../utils/businessTime'
 import { paginate } from '../utils/pagination'
 
 function ensureAdminCanAccessReport(req: AuthRequest, report: any) {
@@ -363,6 +364,7 @@ export const getAdminBookingsHandler = asyncHandler(async (req: AuthRequest, res
 export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const validatedInput = createAdminManualBookingSchema.parse(req.body)
   const { userId, userPhone, firstName, lastName, email } = validatedInput
+  const dateKey = validatedInput.date
 
   const turf = await findTurfById(validatedInput.turf)
   if (!turf) {
@@ -465,11 +467,6 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
 
   // Check slot availability (same logic as regular booking)
   // Must check if the entire time range overlaps with existing bookings
-  const timeToMinutes = (timeString: string): number => {
-    const [hours, minutes] = timeString.split(':').map(Number)
-    return hours * 60 + minutes
-  }
-
   // Helper function to check if two time ranges overlap (handles midnight-spanning slots)
   const doTimeRangesOverlap = (
     start1: string,
@@ -522,10 +519,14 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
   }
 
   const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000)
+  const { start, endExclusive } = getDhakaDayRange(dateKey)
   const potentialConflicts = await Booking.find({
     turf: validatedInput.turf,
     facility: validatedInput.facility, // Filter by facility
-    date: validatedInput.date,
+    date: {
+      $gte: start,
+      $lt: endExclusive,
+    },
     $or: [
       { status: 'confirmed' },
       {
@@ -548,18 +549,16 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
   }
 
   // Helper function to determine day type
-  const getDayType = (date: Date): 'sunday-thursday' | 'friday-saturday' => {
-    const dayOfWeek = date.getDay() // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
+  const getDayType = (bookingDateKey: string): 'sunday-thursday' | 'friday-saturday' => {
+    const dayOfWeek = getDhakaWeekday(bookingDateKey) // 0 = Sunday, ..., 6 = Saturday
     // Friday (5) and Saturday (6) are considered weekends
     return (dayOfWeek === 5 || dayOfWeek === 6) ? 'friday-saturday' : 'sunday-thursday'
   }
 
   // Helper function to calculate duration in hours
   const calculateDurationInHours = (startTime: string, endTime: string): number => {
-    const start = new Date(`1970-01-01T${startTime}:00`)
-    const end = new Date(`1970-01-01T${endTime}:00`)
-    const diffMilliseconds = end.getTime() - start.getTime()
-    return Math.round((diffMilliseconds / (1000 * 60 * 60)) * 100) / 100
+    const durationMinutes = timeToMinutes(endTime) - timeToMinutes(startTime)
+    return Math.round((durationMinutes / 60) * 100) / 100
   }
 
   // Calculate pricing - check if totalPayment override is provided
@@ -568,7 +567,7 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
 
   if (totalPayment !== undefined && totalPayment !== null) {
     // Override mode: use provided totalPayment
-    const dayType = getDayType(validatedInput.date)
+    const dayType = getDayType(dateKey)
     const durationInHours = calculateDurationInHours(validatedInput.startTime, validatedInput.endTime)
     
     pricingDetails = {
@@ -580,7 +579,7 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
     }
   } else {
     // Normal mode: calculate pricing using facility pricing only (no turf fallback)
-    pricingDetails = calculateFacilityPrice(facility, validatedInput.date, validatedInput.startTime, validatedInput.endTime)
+    pricingDetails = calculateFacilityPrice(facility, dateKey, validatedInput.startTime, validatedInput.endTime)
   }
 
   // Admin manual bookings are immediately confirmed and marked manual
@@ -588,6 +587,7 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
     ...validatedInput,
     user: bookingUser._id, // Use the found or created user
     facility: validatedInput.facility, // Include facility
+    date: dhakaDateStart(dateKey),
     appliedPricePerSlot: pricingDetails.pricePerSlot,
     totalPrice: pricingDetails.totalPrice,
     pricingRule: pricingDetails.appliedRule,
@@ -922,4 +922,3 @@ export const deleteReportHandler = asyncHandler(async (req: AuthRequest, res: Re
     data: existingReport,
   })
 })
-
