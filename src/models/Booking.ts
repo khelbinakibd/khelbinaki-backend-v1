@@ -60,4 +60,21 @@ bookingSchema.index({ status: 1, paymentStatus: 1 })
 bookingSchema.index({ createdAt: -1 })
 bookingSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 })
 
+bookingSchema.index(
+  {
+    turf: 1,
+    facility: 1,
+    date: 1,
+    startTime: 1,
+    endTime: 1,
+  },
+  {
+    name: 'uniq_active_booking_slot',
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: ['pending', 'confirmed'] },
+    },
+  },
+)
+
 export const Booking = mongoose.model<IBooking>('Booking', bookingSchema)
