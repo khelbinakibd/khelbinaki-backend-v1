@@ -8,6 +8,7 @@ import { User } from '../models/User'
 import { createAdminManualBookingSchema } from '../schemas/bookingSchema'
 import { createAdminSchema, updateUserSchema, updateUserStatusSchema } from '../schemas/userSchema'
 import { createBooking } from '../services/bookingServices'
+import { mutateBookingOccupancy } from '../services/bookingOccupancyService'
 import { getAdminDashboardStats, getManagerDashboardStats } from '../services/dashboardService'
 import { sendBookingConfirmationEmail } from '../services/emailServices'
 import { deleteReport, getReportById, getReports, updateReportStatus } from '../services/supportServices'
@@ -18,7 +19,7 @@ import { uploadToCloudinary } from '../services/uploadService'
 import { updateUserById } from '../services/userServices'
 import AppError from '../utils/AppError'
 import asyncHandler from '../utils/asyncHandler'
-import { dhakaDateStart, getDhakaDayRange, getDhakaWeekday, timeToMinutes } from '../utils/businessTime'
+import { dhakaDateStart, getDhakaWeekday, timeToMinutes } from '../utils/businessTime'
 import { paginate } from '../utils/pagination'
 
 function ensureAdminCanAccessReport(req: AuthRequest, report: any) {
@@ -366,7 +367,7 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
   const { userId, userPhone, firstName, lastName, email } = validatedInput
   const dateKey = validatedInput.date
 
-  const turf = await findTurfById(validatedInput.turf)
+  const turf = await Turf.findById(validatedInput.turf)
   if (!turf) {
     throw new AppError('Turf not found', 404)
   }
@@ -465,89 +466,6 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
     }
   }
 
-  // Check slot availability (same logic as regular booking)
-  // Must check if the entire time range overlaps with existing bookings
-  // Helper function to check if two time ranges overlap (handles midnight-spanning slots)
-  const doTimeRangesOverlap = (
-    start1: string,
-    end1: string,
-    start2: string,
-    end2: string,
-  ): boolean => {
-    const start1Minutes = timeToMinutes(start1)
-    const end1Minutes = timeToMinutes(end1)
-    const start2Minutes = timeToMinutes(start2)
-    const end2Minutes = timeToMinutes(end2)
-
-    const range1SpansMidnight = end1Minutes < start1Minutes
-    const range2SpansMidnight = end2Minutes < start2Minutes
-
-    // If both ranges span midnight, they always overlap (simplified check)
-    if (range1SpansMidnight && range2SpansMidnight) {
-      return true
-    }
-
-    // If range1 spans midnight
-    if (range1SpansMidnight) {
-      // Range1: [start1, 24:00) U [00:00, end1)
-      // Check if range2 overlaps with either part
-      return (
-        (start2Minutes >= start1Minutes && start2Minutes < 24 * 60) || // Overlaps with first part
-        (end2Minutes > start1Minutes && end2Minutes <= 24 * 60) || // Overlaps with first part
-        (start2Minutes >= 0 && start2Minutes < end1Minutes) || // Overlaps with second part
-        (end2Minutes > 0 && end2Minutes <= end1Minutes) || // Overlaps with second part
-        (start2Minutes < end1Minutes && end2Minutes > start1Minutes) // Spans across both parts
-      )
-    }
-
-    // If range2 spans midnight
-    if (range2SpansMidnight) {
-      // Range2: [start2, 24:00) U [00:00, end2)
-      // Check if range1 overlaps with either part
-      return (
-        (start1Minutes >= start2Minutes && start1Minutes < 24 * 60) || // Overlaps with first part
-        (end1Minutes > start2Minutes && end1Minutes <= 24 * 60) || // Overlaps with first part
-        (start1Minutes >= 0 && start1Minutes < end2Minutes) || // Overlaps with second part
-        (end1Minutes > 0 && end1Minutes <= end2Minutes) || // Overlaps with second part
-        (start1Minutes < end2Minutes && end1Minutes > start2Minutes) // Spans across both parts
-      )
-    }
-
-    // Both ranges are same-day: standard overlap check
-    // Overlap occurs if: range1 starts before range2 ends AND range1 ends after range2 starts
-    return start1Minutes < end2Minutes && end1Minutes > start2Minutes
-  }
-
-  const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000)
-  const { start, endExclusive } = getDhakaDayRange(dateKey)
-  const potentialConflicts = await Booking.find({
-    turf: validatedInput.turf,
-    facility: validatedInput.facility, // Filter by facility
-    date: {
-      $gte: start,
-      $lt: endExclusive,
-    },
-    $or: [
-      { status: 'confirmed' },
-      {
-        status: 'pending',
-        createdAt: { $gte: fifteenMinutesAgo },
-      },
-    ],
-  }).select('startTime endTime status createdAt')
-
-  for (const booking of potentialConflicts) {
-    // Use overlap function that handles midnight-spanning slots
-    if (doTimeRangesOverlap(
-      validatedInput.startTime,
-      validatedInput.endTime,
-      booking.startTime,
-      booking.endTime,
-    )) {
-      throw new AppError('This time slot is already booked or temporarily reserved', 409)
-    }
-  }
-
   // Helper function to determine day type
   const getDayType = (bookingDateKey: string): 'sunday-thursday' | 'friday-saturday' => {
     const dayOfWeek = getDhakaWeekday(bookingDateKey) // 0 = Sunday, ..., 6 = Saturday
@@ -608,7 +526,7 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
   delete bookingData.lastName
   delete bookingData.email
 
-  const newBooking = await createBooking(bookingData)
+  const newBooking = await createBooking(bookingData, req.user!)
 
   res.status(201).json({
     message: 'Admin booking created successfully.',
@@ -620,36 +538,8 @@ export const createAdminBookingHandler = asyncHandler(async (req: AuthRequest, r
 export const cancelBookingHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id: bookingId } = req.params
 
-  const booking = await Booking.findById(bookingId).populate('turf')
-  if (!booking) {
-    throw new AppError('Booking not found', 404)
-  }
-
-  // Check permissions
-  const turf = booking.turf as any
-  const isAdminOfThisTurf = turf && turf.admins.some((adminId: any) => adminId.equals(req.user!.id))
-
-  if (req.user!.role !== 'manager' && !isAdminOfThisTurf) {
-    throw new AppError('Forbidden: You are not authorized to cancel this booking.', 403)
-  }
-
-  // Can't cancel already cancelled bookings
-  if (booking.status === 'cancelled') {
-    throw new AppError('Booking is already cancelled', 400)
-  }
-
-  // Handle refund logic for paid bookings
-  const updateData: any = booking.paymentStatus === 'paid'
-    ? { status: 'cancelled', paymentStatus: 'refunded' }
-    : { status: 'cancelled' }
-
-  const updatedBooking = await Booking.findByIdAndUpdate(
-    bookingId,
-    updateData,
-    { new: true, runValidators: true },
-  )
-
-  const refundMessage = booking.paymentStatus === 'paid'
+  const updatedBooking = await mutateBookingOccupancy(bookingId, req.user!, { kind: 'cancel-admin' })
+  const refundMessage = updatedBooking.$locals.refundRequired
     ? 'Booking cancelled and payment marked as refunded. Please process the refund to the user.'
     : 'Booking cancelled successfully.'
 
@@ -667,25 +557,8 @@ export const updateBookingPaymentHandler = asyncHandler(async (req: AuthRequest,
     throw new AppError('Invalid payment status. Only "paid" is allowed.', 400)
   }
 
-  const booking = await Booking.findById(bookingId).populate('turf')
-  if (!booking) {
-    throw new AppError('Booking not found', 404)
-  }
-
-  // Authorization check
-  const turf = booking.turf as any
-  const isAdminOfThisTurf = turf && turf.admins.some((adminId: any) => adminId.equals(req.user!.id))
-  if (req.user!.role !== 'manager' && !isAdminOfThisTurf) {
-    throw new AppError('Forbidden: You are not authorized to modify this booking.', 403)
-  }
-
-  booking.paymentStatus = 'paid'
-  // If the booking was pending, confirming it is a logical next step
-  if (booking.status === 'pending') {
-    booking.status = 'confirmed'
-  }
-
-  await booking.save()
+  const booking = await mutateBookingOccupancy(bookingId, req.user!, { kind: 'paid' })
+  await booking.populate('turf')
 
   res.json({
     message: 'Booking has been marked as paid.',
@@ -697,22 +570,7 @@ export const updateBookingPaymentHandler = asyncHandler(async (req: AuthRequest,
 export const deleteBookingHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id: bookingId } = req.params
 
-  const booking = await Booking.findById(bookingId).populate('turf')
-  if (!booking) {
-    throw new AppError('Booking not found', 404)
-  }
-
-  // CORRECTED PERMISSION LOGIC
-  if (req.user!.role !== 'manager') {
-    const turf = booking.turf as any
-    const isAdminOfThisTurf = turf && turf.admins.some((adminId: any) => adminId.equals(req.user!.id))
-
-    if (!isAdminOfThisTurf) {
-      throw new AppError('Forbidden: You are not authorized to delete this booking.', 403)
-    }
-  }
-
-  await Booking.findByIdAndDelete(bookingId)
+  await mutateBookingOccupancy(bookingId, req.user!, { kind: 'delete' })
 
   res.json({
     message: 'Booking deleted successfully.',
@@ -723,26 +581,8 @@ export const deleteBookingHandler = asyncHandler(async (req: AuthRequest, res: R
 export const approveBookingPaymentHandler = asyncHandler(async (req: AuthRequest, res: Response) => {
   const { id: bookingId } = req.params
 
-  const booking = await Booking.findById(bookingId).populate('user turf')
-
-  if (!booking) {
-    throw new AppError('Booking not found', 404)
-  }
-
-  // Authorization check
-  const turf = booking.turf as any
-  const isAdminForThisTurf = turf.admins.some((adminId: any) => adminId.equals(req.user!.id))
-  if (req.user!.role !== 'manager' && !isAdminForThisTurf) {
-    throw new AppError('Forbidden: you do not manage this turf', 403)
-  }
-
-  if (booking.paymentStatus === 'paid') {
-    throw new AppError('Booking is already paid and confirmed', 400)
-  }
-
-  booking.paymentStatus = 'paid'
-  booking.status = 'confirmed'
-  await booking.save()
+  const booking = await mutateBookingOccupancy(bookingId, req.user!, { kind: 'approve' })
+  await booking.populate('user turf')
 
   // Send confirmation email
   try {

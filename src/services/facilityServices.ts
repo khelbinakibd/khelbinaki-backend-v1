@@ -3,6 +3,9 @@ import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
 import AppError from '../utils/AppError'
 import mongoose from 'mongoose'
+import { Booking } from '../models/Booking'
+import { MaintenanceBlock } from '../models/MaintenanceBlock'
+import { withFacilityOccupancyGuard } from './facilityOccupancyGuard'
 
 // Create facility for a turf
 export async function createFacility(turfId: string, data: Partial<IFacility>) {
@@ -115,20 +118,16 @@ export async function deleteFacility(facilityId: string, hardDelete = false) {
     throw new AppError('Facility not found', 404)
   }
 
-  if (hardDelete) {
-    // Check if facility has any bookings
-    const { Booking } = await import('../models/Booking')
-    const bookingCount = await Booking.countDocuments({ facility: facilityId })
-
-    if (bookingCount > 0) {
-      throw new AppError('Cannot delete facility with existing bookings. Use soft delete instead.', 400)
+  return withFacilityOccupancyGuard(new mongoose.Types.ObjectId(facilityId), facility.turf, async (session) => {
+    if (hardDelete) {
+      const bookingCount = await Booking.countDocuments({ facility: facilityId }).session(session)
+      if (bookingCount > 0)
+        throw new AppError('Cannot delete facility with existing bookings. Use soft delete instead.', 400)
+      const blockCount = await MaintenanceBlock.countDocuments({ facility: facilityId }).session(session)
+      if (blockCount > 0)
+        throw new AppError('Cannot delete facility with maintenance history. Use soft delete instead.', 400)
+      return Facility.findByIdAndDelete(facilityId, { session })
     }
-
-    return Facility.findByIdAndDelete(facilityId)
-  }
-  else {
-    // Soft delete: set isActive to false
-    return Facility.findByIdAndUpdate(facilityId, { isActive: false }, { new: true })
-  }
+    return Facility.findByIdAndUpdate(facilityId, { isActive: false }, { new: true, session })
+  })
 }
-

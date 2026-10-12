@@ -1,16 +1,12 @@
-import type { IBooking } from '../models/Booking'
 import { Booking } from '../models/Booking'
 import { Facility } from '../models/Facility'
 import { Turf } from '../models/Turf'
 import AppError from '../utils/AppError'
-import { getDhakaDayRange, isDhakaSlotInPast, timeToMinutes } from '../utils/businessTime'
+import { addDaysToDateKey, dhakaDateStart, isDhakaSlotInPast, timeToMinutes } from '../utils/businessTime'
 import { calculateFacilityPrice } from './facilityPricingService'
-
-// Creating booking service
-export async function createBooking(data: Partial<IBooking>) {
-  const newBooking = await Booking.create(data)
-  return newBooking
-}
+import { MaintenanceBlock } from '../models/MaintenanceBlock'
+import { ACTIVE_BOOKING_STATUSES, occupancyDateWindow, slotsOverlap } from './occupancyService'
+export { createGuardedBooking as createBooking } from './bookingOccupancyService'
 
 // Find booking service
 export async function findBookingByUser(userId: string) {
@@ -28,72 +24,6 @@ export async function findBookingById(bookingId: string) {
     .populate('user', 'name email')
     .populate('turf')
     .populate('facility', 'name')
-}
-
-// Helper function to check if two time ranges overlap (handles midnight-spanning slots)
-function doTimeRangesOverlap(
-  start1: string,
-  end1: string,
-  start2: string,
-  end2: string,
-): boolean {
-  const start1Minutes = timeToMinutes(start1)
-  const end1Minutes = timeToMinutes(end1)
-  const start2Minutes = timeToMinutes(start2)
-  const end2Minutes = timeToMinutes(end2)
-
-  const range1SpansMidnight = end1Minutes < start1Minutes
-  const range2SpansMidnight = end2Minutes < start2Minutes
-
-  // If both ranges span midnight, they always overlap (simplified check)
-  if (range1SpansMidnight && range2SpansMidnight) {
-    return true
-  }
-
-  // If range1 spans midnight
-  if (range1SpansMidnight) {
-    // Range1: [start1, 24:00) U [00:00, end1)
-    // Check if range2 overlaps with either part
-    return (
-      (start2Minutes >= start1Minutes && start2Minutes < 24 * 60) || // Overlaps with first part
-      (end2Minutes > start1Minutes && end2Minutes <= 24 * 60) || // Overlaps with first part
-      (start2Minutes >= 0 && start2Minutes < end1Minutes) || // Overlaps with second part
-      (end2Minutes > 0 && end2Minutes <= end1Minutes) || // Overlaps with second part
-      (start2Minutes < end1Minutes && end2Minutes > start1Minutes) // Spans across both parts
-    )
-  }
-
-  // If range2 spans midnight
-  if (range2SpansMidnight) {
-    // Range2: [start2, 24:00) U [00:00, end2)
-    // Check if range1 overlaps with either part
-    return (
-      (start1Minutes >= start2Minutes && start1Minutes < 24 * 60) || // Overlaps with first part
-      (end1Minutes > start2Minutes && end1Minutes <= 24 * 60) || // Overlaps with first part
-      (start1Minutes >= 0 && start1Minutes < end2Minutes) || // Overlaps with second part
-      (end1Minutes > 0 && end1Minutes <= end2Minutes) || // Overlaps with second part
-      (start1Minutes < end2Minutes && end1Minutes > start2Minutes) // Spans across both parts
-    )
-  }
-
-  // Both ranges are same-day: standard overlap check
-  // Overlap occurs if: range1 starts before range2 ends AND range1 ends after range2 starts
-  return start1Minutes < end2Minutes && end1Minutes > start2Minutes
-}
-
-// Helper function to check if a time slot overlaps with any existing booking range
-function isSlotOverlapWithBookings(
-  slotStartTime: string,
-  slotEndTime: string,
-  bookings: Array<{ startTime: string, endTime: string }>,
-): boolean {
-  for (const booking of bookings) {
-    if (doTimeRangesOverlap(slotStartTime, slotEndTime, booking.startTime, booking.endTime)) {
-      return true
-    }
-  }
-
-  return false
 }
 
 function minutesToTime(totalMinutes: number): string {
@@ -132,27 +62,14 @@ export async function getTurfAvailability(turfId: string, dateKey: string, facil
     throw new AppError('Facility must have pricing rules configured', 400)
   }
 
-  const { start, endExclusive } = getDhakaDayRange(dateKey)
-
-  //  Get all bookings that make slots unavailable (filtered by facility)
+  // Pending and confirmed remain active until an explicit guarded transition.
+  const dateWindow = occupancyDateWindow(dateKey)
   const unavailableBookings = await Booking.find({
-    turf: turfId,
-    facility: facilityId, // Filter by facility
-    date: {
-      $gte: start,
-      $lt: endExclusive,
-    },
-    // A slot is unavailable if:
-    // 1. Booking is confirmed (paid or unpaid)
-    // 2. Booking is pending and created within last 15 minutes (temporary hold)
-    $or: [
-      { status: 'confirmed' }, // Always unavailable regardless of payment
-      {
-        status: 'pending',
-        createdAt: { $gte: new Date(Date.now() - 15 * 60 * 1000) },
-      },
-    ],
-  }).select('startTime endTime status paymentStatus')
+    facility: facilityId, date: dateWindow, status: { $in: ACTIVE_BOOKING_STATUSES },
+  }).select('date startTime endTime')
+  const maintenanceBlocks = await MaintenanceBlock.find({
+    facility: facilityId, date: dateWindow, releasedAt: null,
+  }).select('date startTime endTime')
 
   // Generate all possible 1-hour slots based on operating hours
   const availableSlots = []
@@ -172,13 +89,11 @@ export async function getTurfAvailability(turfId: string, dateKey: string, facil
     // Calculate price for each slot using facility pricing (facility-only, no turf fallback)
     const pricing = calculateFacilityPrice(facility, dateKey, startTimeString, endTimeString)
 
-    // Check if this 1-hour slot overlaps with ANY existing booking range
-    const hasOverlap = isSlotOverlapWithBookings(
-      startTimeString,
-      endTimeString,
-      unavailableBookings.map(b => ({ startTime: b.startTime, endTime: b.endTime })),
-    )
-    const isTimePassed = isDhakaSlotInPast(dateKey, startTimeString)
+    const slotDateKey = addDaysToDateKey(dateKey, Math.floor(currentMinutes / (24 * 60)))
+    const slot = { date: dhakaDateStart(slotDateKey), startTime: startTimeString, endTime: endTimeString }
+    const hasOverlap = unavailableBookings.some(booking => slotsOverlap(slot, booking))
+      || maintenanceBlocks.some(block => slotsOverlap(slot, block))
+    const isTimePassed = isDhakaSlotInPast(slotDateKey, startTimeString)
 
     availableSlots.push({
       startTime: startTimeString,
@@ -196,14 +111,4 @@ export async function getTurfAvailability(turfId: string, dateKey: string, facil
     dayType,
     slots: availableSlots,
   }
-}
-
-// Update booking status service
-export async function updateBookingStatus(bookingId: string, status: 'pending' | 'confirmed' | 'cancelled') {
-  const updatedBooking = await Booking.findByIdAndUpdate(
-    bookingId,
-    { status },
-    { new: true, runValidators: true },
-  )
-  return updatedBooking
 }

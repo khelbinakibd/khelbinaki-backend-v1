@@ -14,6 +14,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "type-check": "tsc --noEmit",
+    "test:expiration": "node --import tsx --test tests/bookingExpiration.test.ts tests/offlineBookingMigration.test.ts",
+    "test:maintenance": "node --import tsx --test tests/maintenance.test.ts tests/maintenance.integration.test.ts",
     "generate-secrets": "bash scripts/generate-secrets.sh",
     "migrate:facilities": "tsx scripts/migrate-bookings-to-facilities.ts",
     "send-welcome-emails": "tsx scripts/send-welcome-emails-to-existing-users.ts"

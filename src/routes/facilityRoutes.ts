@@ -8,8 +8,14 @@ import {
 } from '../controllers/facilityController'
 import { requireAuth } from '../middlewares/authMiddleware'
 import { permitRoles } from '../middlewares/roleMiddleware'
+import { createMaintenanceBlockHandler, listMaintenanceBlocksHandler, releaseMaintenanceBlockHandler } from '../controllers/maintenanceController'
 
 const facilityRouter = Router()
+
+// Turf membership is checked by the service for every operation, including IDs.
+facilityRouter.get('/facilities/:facilityId/maintenance-blocks', requireAuth, listMaintenanceBlocksHandler)
+facilityRouter.post('/facilities/:facilityId/maintenance-blocks', requireAuth, createMaintenanceBlockHandler)
+facilityRouter.patch('/facilities/:facilityId/maintenance-blocks/:blockId/release', requireAuth, releaseMaintenanceBlockHandler)
 
 // Public: Get facilities for a turf
 facilityRouter.get('/turfs/:turfId/facilities', getFacilitiesByTurfHandler)
@@ -27,4 +33,3 @@ facilityRouter.put('/facilities/:facilityId', requireAuth, permitRoles('admin', 
 facilityRouter.delete('/facilities/:facilityId', requireAuth, permitRoles('admin', 'manager'), deleteFacilityHandler)
 
 export default facilityRouter
-

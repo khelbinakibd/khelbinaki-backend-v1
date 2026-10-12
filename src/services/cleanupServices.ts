@@ -1,6 +1,6 @@
 // Optional service to clean up expired data
 
-import { Booking } from '../models/Booking'
+import { DEFAULT_EXPIRATION_BATCH_LIMIT, ExpirationBatchError, expirePendingBookings } from './bookingExpirationService'
 import { Otp } from '../models/Otp'
 import { RefreshToken } from '../models/RefreshToken'
 import { logger } from '../utils/logger'
@@ -49,24 +49,20 @@ export function startPeriodicCleanup() {
   logger.info('Periodic cleanup scheduled every hour')
 }
 
-/*  Cleanup Service for Expired Bookings */
-export async function cleanupExpiredBookings() {
+/** One bounded batch, not a complete sweep. Returns committed transitions.
+ * Call repeatedly to drain a backlog; ExpirationBatchError reports partial progress.
+ * Offline-only until the TTL migration and all BUG-08 occupancy guards are deployed.
+ */
+export async function cleanupExpiredBookings(batchLimit = DEFAULT_EXPIRATION_BATCH_LIMIT) {
   try {
-    const expiredBookings = await Booking.updateMany(
-      {
-        status: 'pending',
-        expiresAt: { $lt: new Date() },
-      },
-      {
-        status: 'expired',
-      },
-    )
-
-    logger.info('Marked bookings as expired', { count: expiredBookings.modifiedCount })
-    return expiredBookings.modifiedCount
+    const count = await expirePendingBookings(new Date(), batchLimit)
+    logger.info('Completed one booking expiration batch', { count, batchLimit })
+    return count
   }
   catch (error) {
-    logger.error('Error during booking cleanup', { error })
+    logger.error('Error during booking cleanup', error instanceof ExpirationBatchError
+      ? { completedCount: error.completedCount, candidateCount: error.candidateCount, batchLimit: error.batchLimit }
+      : { errorType: error instanceof Error ? error.name : 'Unknown' })
     throw error
   }
 }

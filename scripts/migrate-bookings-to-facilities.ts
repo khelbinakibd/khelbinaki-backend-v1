@@ -6,7 +6,8 @@
  * 2. Assigns all existing bookings to their turf's default facility
  * 3. Ensures no bookings remain without a facility
  * 
- * The script is idempotent - safe to run multiple times.
+ * Offline only: stop all writers and disable their DB access before running.
+ * See docs/bug-08-expiration-prerequisites.md. This is not safe alongside live APIs.
  */
 
 import mongoose from 'mongoose'
@@ -17,16 +18,7 @@ import path from 'path'
 import { Turf } from '../src/models/Turf'
 import { Facility } from '../src/models/Facility'
 import { Booking } from '../src/models/Booking'
-
-// Load environment variables
-dotenv.config({ path: path.join(__dirname, '../.env') })
-
-const MONGODB_URI = process.env.MONGODB_URI || ''
-
-if (!MONGODB_URI) {
-  console.error('❌ MONGODB_URI is not set in environment variables')
-  process.exit(1)
-}
+import { assertOfflineBookingMigration } from '../src/utils/offlineBookingMigration'
 
 interface MigrationStats {
   turfsProcessed: number
@@ -38,19 +30,25 @@ interface MigrationStats {
 }
 
 async function connectDB() {
-  try {
-    await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 10000,
-    })
-    console.log('✅ Connected to MongoDB')
-  }
-  catch (error) {
-    console.error('❌ MongoDB connection failed:', error)
-    process.exit(1)
-  }
+  const uri = process.env.MONGODB_URI
+  if (!uri)
+    throw new Error('MONGODB_URI is not configured')
+
+  await mongoose.connect(uri, {
+    serverSelectionTimeoutMS: 10000,
+    // An offline data migration must never change indexes implicitly.
+    autoIndex: false,
+    autoCreate: false,
+  })
+  console.log('✅ Connected to MongoDB')
 }
 
 async function migrateBookingsToFacilities() {
+  if (!mongoose.connection.db)
+    throw new Error('Migration requires an existing database connection')
+
+  // Also protect exported invocation, not just the CLI entrypoint.
+  assertOfflineBookingMigration(process.argv.slice(2), process.env, mongoose.connection.db.databaseName)
   const stats: MigrationStats = {
     turfsProcessed: 0,
     facilitiesCreated: 0,
@@ -112,12 +110,12 @@ async function migrateBookingsToFacilities() {
           
           for (const booking of bookingsToUpdate) {
             try {
-              booking.facility = defaultFacility._id
+              booking.facility = new mongoose.Types.ObjectId(String(defaultFacility._id))
               await booking.save()
               stats.bookingsUpdated++
             }
             catch (error: any) {
-              console.error(`    ❌ Error updating booking ${booking._id}:`, error.message)
+              console.error('Booking migration write failed; inspect data privately before retrying')
               stats.errors++
             }
           }
@@ -131,7 +129,7 @@ async function migrateBookingsToFacilities() {
         console.log('')
       }
       catch (error: any) {
-        console.error(`  ❌ Error processing turf ${turf._id}:`, error.message)
+        console.error('Turf migration failed; inspect data privately before retrying')
         stats.errors++
         console.log('')
       }
@@ -171,27 +169,32 @@ async function migrateBookingsToFacilities() {
     }
     else {
       console.log('\n⚠️  Migration completed with warnings. Please review the output above.')
+      throw new Error('Offline facility migration did not complete successfully')
     }
   }
   catch (error) {
-    console.error('❌ Migration failed:', error)
+    console.error('❌ Migration failed; no connection details printed')
     throw error
   }
 }
 
 async function main() {
   try {
+    // Refuse before loading credentials or connecting. Do not start the app:
+    // its entrypoint seeds the database.
+    assertOfflineBookingMigration(process.argv.slice(2), process.env)
+    dotenv.config({ path: path.join(__dirname, '../.env.development'), quiet: true })
+    assertOfflineBookingMigration(process.argv.slice(2), process.env)
     await connectDB()
     await migrateBookingsToFacilities()
   }
   catch (error) {
-    console.error('Fatal error:', error)
-    process.exit(1)
+    console.error('Offline migration refused or failed; verify offline acknowledgement, database confirmation and development configuration')
+    process.exitCode = 1
   }
   finally {
     await mongoose.disconnect()
     console.log('\n👋 Disconnected from MongoDB')
-    process.exit(0)
   }
 }
 
@@ -201,4 +204,3 @@ if (require.main === module) {
 }
 
 export { migrateBookingsToFacilities }
-

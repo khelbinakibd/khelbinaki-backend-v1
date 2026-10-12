@@ -7,6 +7,7 @@ export interface IFacility extends mongoose.Document {
   pricingRules: IPricingRule[] // Required: facility must have pricing rules
   defaultPricePerSlot?: number // Optional: display-only fallback when no rules match
   isActive: boolean
+  occupancyRevision: number
   createdAt: Date
   updatedAt: Date
 }
@@ -35,6 +36,9 @@ const facilitySchema = new mongoose.Schema<IFacility>({
   pricingRules: { type: [pricingRulesSchema], required: true }, // Required: facility must have pricing rules
   defaultPricePerSlot: { type: Number }, // Optional: display-only fallback
   isActive: { type: Boolean, default: true },
+  // All occupancy writers must increment this in their transaction (BUG-08).
+  // $inc also initializes the field on pre-existing facilities.
+  occupancyRevision: { type: Number, default: 0, select: false },
 }, { timestamps: true })
 
 // Validate that pricingRules array is not empty
@@ -52,4 +56,3 @@ facilitySchema.index({ turf: 1, isActive: 1 })
 facilitySchema.index({ turf: 1, name: 1 }) // For unique name per turf queries
 
 export const Facility = mongoose.model<IFacility>('Facility', facilitySchema)
-

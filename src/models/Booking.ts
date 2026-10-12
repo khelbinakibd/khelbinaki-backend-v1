@@ -11,11 +11,12 @@ export interface IBooking extends mongoose.Document {
   totalPrice: number
   pricingRule: string
   dayType: string
-  status: 'pending' | 'confirmed' | 'cancelled'
+  status: 'pending' | 'confirmed' | 'cancelled' | 'expired'
   paymentStatus: 'unpaid' | 'paid' | 'refunded' | 'pending_approval'
   transactionId?: string // New field for bKash transaction ID
   paidAmount?: number // New field for the amount paid
-  expiresAt: Date
+  expiresAt?: Date
+  expiredAt?: Date
   lastDigit: number
   // Manual booking flags
   isManual?: boolean
@@ -36,7 +37,7 @@ const bookingSchema = new mongoose.Schema<IBooking>({
   pricingRule: { type: String, required: true },
   dayType: { type: String, required: true },
 
-  status: { type: String, enum: ['pending', 'confirmed', 'cancelled'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'confirmed', 'cancelled', 'expired'], default: 'pending' },
   paymentStatus: {
     type: String,
     enum: ['unpaid', 'paid', 'refunded', 'pending_approval'],
@@ -45,6 +46,7 @@ const bookingSchema = new mongoose.Schema<IBooking>({
   transactionId: { type: String }, // Add transactionId to the schema
   paidAmount: { type: Number }, // Add paidAmount to the schema
   expiresAt: { type: Date },
+  expiredAt: { type: Date },
   lastDigit: { type: Number },
   // Flags for manual/admin-created bookings
   isManual: { type: Boolean, default: false },
@@ -58,7 +60,9 @@ bookingSchema.index({ user: 1, createdAt: -1 })
 bookingSchema.index({ dayType: 1, date: 1 })
 bookingSchema.index({ status: 1, paymentStatus: 1 })
 bookingSchema.index({ createdAt: -1 })
-bookingSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 })
+// Explicit guarded expiration retains booking/payment history. Removing this
+// declaration does NOT remove an existing TTL index: see the migration runbook.
+bookingSchema.index({ status: 1, expiresAt: 1 }, { name: 'booking_expiration_candidates' })
 
 bookingSchema.index(
   {
