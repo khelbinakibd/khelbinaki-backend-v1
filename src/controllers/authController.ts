@@ -238,8 +238,8 @@ export const refreshToken = asyncHandler(async (req: Request, res: Response) => 
 
   // Rotate token
   await storedToken.deleteOne()
-  const newRefreshToken = signRefreshToken({ id: payload.id, role: payload.role })
-  const newAccessToken = signAccessToken({ id: payload.id, role: payload.role })
+  const newRefreshToken = signRefreshToken({ id: user._id, role: user.role })
+  const newAccessToken = signAccessToken({ id: user._id, role: user.role })
 
   await RefreshToken.create({
     user: payload.id,

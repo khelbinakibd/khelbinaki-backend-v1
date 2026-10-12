@@ -1,71 +1,81 @@
 import type { NextFunction, Request, Response } from 'express'
+import { User } from '../models/User'
 import { verifyAccessToken } from '../utils/jwt'
 
 export interface AuthRequest extends Request {
   user?: { id: string, role: 'user' | 'admin' | 'manager' }
 }
 
-export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
-  // Try to get token from multiple sources (prioritize cookies for security)
-  let token = req.cookies?.accessToken
+function accessToken(req: AuthRequest) {
+  const auth = req.headers.authorization
+  return req.cookies?.accessToken || (auth?.startsWith('Bearer ') ? auth.split(' ')[1] : undefined)
+}
 
-  // Fallback to Authorization header if no cookie (for API clients)
-  if (!token) {
-    const auth = req.headers.authorization
-    token = auth?.startsWith('Bearer ') ? auth.split(' ')[1] : undefined
-  }
+function verifiedUserId(token: string): string {
+  const payload = verifyAccessToken(token) as { id?: unknown, role?: unknown }
+  if (!payload?.role || typeof payload?.id !== 'string' || !/^[a-f\d]{24}$/i.test(payload.id))
+    throw new Error('Invalid token payload')
+  return payload.id
+}
 
-  if (!token) {
-    return res.status(401).json({
-      message: 'Access token required',
-      error: 'UNAUTHORIZED',
-    })
-  }
+async function currentIdentity(id: string): Promise<AuthRequest['user']> {
+  const user = await User.findById(id).select('_id role isActive').lean()
+  if (!user || !user.isActive || !['user', 'admin', 'manager'].includes(user.role))
+    return undefined
+  return { id: user._id.toString(), role: user.role }
+}
 
+export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
+  req.user = undefined
+  const token = accessToken(req)
+  if (!token)
+    return res.status(401).json({ message: 'Access token required', error: 'UNAUTHORIZED' })
+
+  let id: string
   try {
-    const payload = verifyAccessToken(token) as { id?: string, role?: string }
-    if (!payload?.id || !payload?.role) {
-      return res.status(401).json({
-        message: 'Invalid token payload',
-        error: 'INVALID_TOKEN',
-      })
-    }
-
-    req.user = { id: String(payload.id), role: payload.role as any }
-    next()
+    id = verifiedUserId(token)
   }
-  catch (error: any) {
-    // Check if token is expired vs invalid
-    const isExpired = error.message?.includes('expired') || error.name === 'TokenExpiredError'
-
+  catch (error) {
+    if (error instanceof Error && error.message === 'Invalid token payload')
+      return res.status(401).json({ message: 'Invalid token payload', error: 'INVALID_TOKEN' })
+    // Preserve the previous classification, including the JWT helper's
+    // combined 'Invalid or expired token' verification error.
+    const isExpired = error instanceof Error && (error.message.includes('expired') || error.name === 'TokenExpiredError')
     return res.status(401).json({
       message: isExpired ? 'Access token expired' : 'Invalid access token',
       error: isExpired ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
     })
   }
+
+  // Database failures are server errors, never grounds to trust token claims.
+  try {
+    req.user = await currentIdentity(id)
+  }
+  catch (error) {
+    return next(error)
+  }
+  if (!req.user)
+    return res.status(401).json({ message: 'User not found or inactive', error: 'UNAUTHORIZED' })
+  next()
 }
 
-// Optional middleware for routes that may have authenticated users but don't require it
-export function optionalAuth(req: AuthRequest, res: Response, next: NextFunction) {
-  let token = req.cookies?.accessToken
-
-  if (!token) {
-    const auth = req.headers.authorization
-    token = auth?.startsWith('Bearer ') ? auth.split(' ')[1] : undefined
+export async function optionalAuth(req: AuthRequest, _res: Response, next: NextFunction) {
+  req.user = undefined
+  const token = accessToken(req)
+  if (!token)
+    return next()
+  let id: string
+  try {
+    id = verifiedUserId(token)
   }
-
-  if (token) {
-    try {
-      const payload = verifyAccessToken(token) as { id?: string, role?: string }
-      if (payload?.id && payload?.role) {
-        req.user = { id: String(payload.id), role: payload.role as any }
-      }
-    }
-    catch (error) {
-      // Silently ignore auth errors for optional auth
-      console.warn('Optional auth failed:', error)
-    }
+  catch {
+    return next()
   }
-
+  try {
+    req.user = await currentIdentity(id)
+  }
+  catch (error) {
+    return next(error)
+  }
   next()
 }
