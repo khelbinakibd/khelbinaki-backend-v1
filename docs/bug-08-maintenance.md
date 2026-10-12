@@ -95,8 +95,8 @@ option. Reactivation must pass the same occupancy checks as creation.
 The integration suite defaults to skipped unless explicitly enabled. It always connects
 to `127.0.0.1`, port 27028 by default (`BUG08_TEST_MONGO_PORT` may override the port), using
 a new random `bug08_test_*` database. It never consumes `MONGODB_URI` or starts the app.
-Automatic index creation is disabled: no application indexes, including BUG-04, are
-created or dropped. MongoDB's normal implicit collection `_id` indexes exist only in the
+Automatic index creation is disabled. The integration fixture explicitly creates
+`uniq_active_booking_slot` from the Booking schema only in its disposable database. MongoDB's normal implicit collection `_id` indexes exist only in the
 disposable test database. The HTTP test uses a synthetic signing key and test configuration.
 
 For reproduction, create an approved disposable local MongoDB 8 replica set, initialize
@@ -121,3 +121,13 @@ contract in the expiration runbook. Backups, index migration/rollback rehearsal,
 permissions and transaction latency under production-like load need manual verification.
 The new MaintenanceBlock query index is declared for future deployment but not installed
 by this work. Do not use broad `syncIndexes()` or run startup/seeding for verification.
+
+### Additional regression fixtures
+
+The isolated integration suite now explicitly creates the schema's BUG-04 unique index
+and adds payment-approval conflict rollback/no-email assertions, assigned-user scope,
+unauthenticated POST/PATCH checks, and manual-conflict customer-retention assertions.
+Manual customer creation currently survives a rejected booking; this is existing behavior,
+not an assertion of atomic customer-and-booking creation. These additional integration
+cases have been type-checked but not executed in this run: no local replica set was available.
+The earlier integration execution counts above describe the earlier suite only.

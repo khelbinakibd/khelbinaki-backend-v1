@@ -1,22 +1,25 @@
+import type { AddressInfo } from 'node:net'
+import type { OccupancyActor } from '../src/services/occupancyService'
 import assert from 'node:assert/strict'
-import { after, before, beforeEach, describe, test } from 'node:test'
+import { createRequire } from 'node:module'
+// eslint-disable-next-line test/no-import-node-test
+import { after, before, beforeEach, describe, mock, test } from 'node:test'
 import mongoose from 'mongoose'
 import { Booking } from '../src/models/Booking'
 import { Facility } from '../src/models/Facility'
 import { MaintenanceBlock } from '../src/models/MaintenanceBlock'
 import { Turf } from '../src/models/Turf'
+import { User } from '../src/models/User'
+import { ExpirationBatchError, expirePendingBookings } from '../src/services/bookingExpirationService'
 import { createGuardedBooking, mutateBookingOccupancy } from '../src/services/bookingOccupancyService'
-import { expirePendingBookings, ExpirationBatchError } from '../src/services/bookingExpirationService'
 import { getTurfAvailability } from '../src/services/bookingServices'
-import { deleteFacility } from '../src/services/facilityServices'
 import { withFacilityOccupancyGuard } from '../src/services/facilityOccupancyGuard'
+import { deleteFacility } from '../src/services/facilityServices'
 import { createMaintenanceBlock, listMaintenanceBlocks, releaseMaintenanceBlock } from '../src/services/maintenanceService'
-import type { OccupancyActor } from '../src/services/occupancyService'
-import type { AddressInfo } from 'node:net'
 import { dhakaDateStart } from '../src/utils/businessTime'
 
 // No .env files, app startup or seeding. Only a fresh DB on a loopback replica set.
-// autoIndex/autoCreate are disabled; no application indexes are created or dropped.
+// autoIndex/autoCreate are disabled; BUG-04 is explicitly installed only in this disposable DB.
 const enabled = process.env.RUN_BUG08_MONGO_TESTS === '1'
 const port = Number(process.env.BUG08_TEST_MONGO_PORT ?? 27028)
 const databaseName = `bug08_test_${new mongoose.Types.ObjectId().toHexString()}`
@@ -31,9 +34,19 @@ let offlineAck: string | undefined
 
 function bookingData(startTime = '10:00', endTime = '11:00'): any {
   return {
-    user: new mongoose.Types.ObjectId(customer.id), turf: turfId, facility: facilityId,
-    date: dhakaDateStart(dateKey), startTime, endTime, status: 'pending', paymentStatus: 'unpaid',
-    appliedPricePerSlot: 100, totalPrice: 100, pricingRule: 'all-days', dayType: 'sunday-thursday', lastDigit: 1234,
+    user: new mongoose.Types.ObjectId(customer.id),
+    turf: turfId,
+    facility: facilityId,
+    date: dhakaDateStart(dateKey),
+    startTime,
+    endTime,
+    status: 'pending',
+    paymentStatus: 'unpaid',
+    appliedPricePerSlot: 100,
+    totalPrice: 100,
+    pricingRule: 'all-days',
+    dayType: 'sunday-thursday',
+    lastDigit: 1234,
   }
 }
 function blockData(startTime = '10:00', endTime = '11:00') {
@@ -52,21 +65,28 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
   before(async () => {
     assert.ok(Number.isInteger(port) && port > 1024 && port < 65536)
     await mongoose.connect(`mongodb://127.0.0.1:${port}/${databaseName}?directConnection=true`, {
-      autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 10000,
+      autoIndex: false,
+      autoCreate: false,
+      serverSelectionTimeoutMS: 10000,
     })
     const db = mongoose.connection.db!
     const hello = await db.command({ hello: 1 })
     assert.ok(hello.setName && hello.logicalSessionTimeoutMinutes)
     assert.equal(db.databaseName, databaseName)
-    for (const model of [Booking, Facility, Turf, MaintenanceBlock])
+    for (const model of [Booking, Facility, Turf, MaintenanceBlock, User])
       await db.createCollection(model.collection.collectionName)
+    // Use the schema's actual BUG-04 specification, never syncIndexes.
+    const unique = Booking.schema.indexes().find(([, options]) => options.name === 'uniq_active_booking_slot')!
+    await Booking.collection.createIndex(unique[0] as mongoose.mongo.IndexSpecification, unique[1] as mongoose.mongo.CreateIndexesOptions)
+    const installed = await Booking.collection.listIndexes().toArray()
+    assert.ok(installed.some(index => index.name === 'uniq_active_booking_slot' && index.unique))
     offlineAck = process.env.BOOKING_EXPIRATION_OFFLINE_ACK
     process.env.BOOKING_EXPIRATION_OFFLINE_ACK = 'all-other-writers-stopped-and-access-disabled'
   })
   after(async () => {
     // Only delete fixtures in this randomly named test DB; never touch other DBs.
     if (mongoose.connection.db?.databaseName === databaseName) {
-      for (const collection of [Booking.collection, MaintenanceBlock.collection, Facility.collection, Turf.collection])
+      for (const collection of [Booking.collection, MaintenanceBlock.collection, Facility.collection, Turf.collection, User.collection])
         await collection.deleteMany({})
     }
     await mongoose.disconnect()
@@ -76,15 +96,19 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
       process.env.BOOKING_EXPIRATION_OFFLINE_ACK = offlineAck
   })
   beforeEach(async () => {
-    for (const collection of [Booking.collection, MaintenanceBlock.collection, Facility.collection, Turf.collection])
+    for (const collection of [Booking.collection, MaintenanceBlock.collection, Facility.collection, Turf.collection, User.collection])
       await collection.deleteMany({})
     const turf = await Turf.create({
-      name: 'isolated test turf', admins: [admin.id], location: { address: 'test', city: 'test' },
-      bkashNumber: 'test', operatingHours: { start: '09:00', end: '14:00' },
+      name: 'isolated test turf',
+      admins: [admin.id],
+      location: { address: 'test', city: 'test' },
+      bkashNumber: 'test',
+      operatingHours: { start: '09:00', end: '14:00' },
     })
     turfId = turf._id as mongoose.Types.ObjectId
     const facility = await Facility.create({
-      name: 'isolated test facility', turf: turfId,
+      name: 'isolated test facility',
+      turf: turfId,
       pricingRules: [{ dayType: 'all-days', timeSlots: [{ startTime: '00:00', endTime: '23:59', pricePerSlot: 100 }] }],
     })
     facilityId = facility._id as mongoose.Types.ObjectId
@@ -119,11 +143,13 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
     await new Promise<void>(resolve => server.once('listening', resolve))
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v1/facilities/${facilityId}/maintenance-blocks`
     const headers = (actor: OccupancyActor) => ({
-      Authorization: `Bearer ${jwt.sign(actor, process.env.JWT_SECRET!, { expiresIn: '5m' })}`,
+      'Authorization': `Bearer ${jwt.sign(actor, process.env.JWT_SECRET!, { expiresIn: '5m' })}`,
       'Content-Type': 'application/json',
     })
     try {
       assert.equal((await fetch(base)).status, 401)
+      assert.equal((await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(blockData()) })).status, 401)
+      assert.equal((await fetch(`${base}/${new mongoose.Types.ObjectId()}/release`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401)
       assert.equal((await fetch(base, { headers: headers(outsider) })).status, 403)
       assert.equal((await fetch(base, { method: 'POST', headers: headers(admin), body: JSON.stringify(blockData('23:00', '01:00')) })).status, 400)
       const created = await fetch(base, { method: 'POST', headers: headers(admin), body: JSON.stringify(blockData()) })
@@ -142,12 +168,72 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
     }
     finally {
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
-      if (originalMode === undefined) delete process.env.NODE_ENV
+      if (originalMode === undefined)
+        delete process.env.NODE_ENV
       else process.env.NODE_ENV = originalMode
-      if (originalKey === undefined) delete process.env.JWT_SECRET
+      if (originalKey === undefined)
+        delete process.env.JWT_SECRET
       else process.env.JWT_SECRET = originalKey
     }
   })
+
+  test('assigned users may list/create/release; unassigned users cannot', async () => {
+    await Turf.updateOne({ _id: turfId }, { $addToSet: { admins: customer.id } })
+    const block = await createMaintenanceBlock(String(facilityId), customer, blockData())
+    assert.equal((await listMaintenanceBlocks(String(facilityId), customer, {})).length, 1)
+    await releaseMaintenanceBlock(String(facilityId), String(block._id), customer)
+    await Turf.updateOne({ _id: turfId }, { $pull: { admins: customer.id } })
+    await assert.rejects(listMaintenanceBlocks(String(facilityId), customer, {}), rejectsWith(403))
+    await assert.rejects(createMaintenanceBlock(String(facilityId), customer, blockData()), rejectsWith(403))
+    await assert.rejects(releaseMaintenanceBlock(String(facilityId), String(block._id), customer), rejectsWith(403))
+  })
+
+  test('payment approval conflict rolls back payment/status/revision and sends no email', async () => {
+    const booking = await Booking.create({ ...bookingData(), status: 'cancelled', paymentStatus: 'pending_approval' })
+    await createMaintenanceBlock(String(facilityId), manager, blockData())
+    const revision = (await Facility.findById(facilityId).select('+occupancyRevision'))!.occupancyRevision
+    const emails = createRequire(`${process.cwd()}/tests/maintenance.integration.test.ts`)('../src/services/emailServices') as typeof import('../src/services/emailServices')
+    const send = mock.method(emails, 'sendBookingConfirmationEmail', async () => {})
+    try {
+      const { approveBookingPaymentHandler } = await import('../src/controllers/adminController')
+      await assert.rejects(new Promise<void>((resolve, reject) => {
+        approveBookingPaymentHandler({ params: { id: String(booking._id) }, user: manager } as any, { json: () => resolve() } as any, reject)
+      }), rejectsWith(409))
+      const after = await Booking.findById(booking._id)
+      assert.equal(after!.status, 'cancelled')
+      assert.equal(after!.paymentStatus, 'pending_approval')
+      assert.equal((await Facility.findById(facilityId).select('+occupancyRevision'))!.occupancyRevision, revision)
+      assert.equal(send.mock.callCount(), 0)
+    }
+    finally { send.mock.restore() }
+  })
+
+  for (const conflict of ['booking', 'maintenance'] as const) {
+    test(`manual ${conflict} conflict retains newly created customer but creates no booking`, async () => {
+      if (conflict === 'booking')
+        await Booking.create(bookingData())
+      else await createMaintenanceBlock(String(facilityId), manager, blockData())
+      const originalCount = await Booking.countDocuments({})
+      const { createAdminBookingHandler } = await import('../src/controllers/adminController')
+      await assert.rejects(new Promise<void>((resolve, reject) => {
+        createAdminBookingHandler({ user: manager, body: {
+          turf: String(turfId),
+          facility: String(facilityId),
+          date: dateKey,
+          startTime: '10:00',
+          endTime: '11:00',
+          userPhone: '01700000000',
+          firstName: 'Isolated',
+          lastName: 'Customer',
+          email: 'isolated@example.invalid',
+          totalPayment: 100,
+          paidAmount: 0,
+        } } as any, { status: () => ({ json: () => resolve() }) } as any, reject)
+      }), rejectsWith(409))
+      assert.equal(await Booking.countDocuments({}), originalCount)
+      assert.equal(await User.countDocuments({ phone: '01700000000' }), 1)
+    })
+  }
 
   test('overlap conflicts, adjacency succeeds, release audit is idempotent', async () => {
     const first = await createMaintenanceBlock(String(facilityId), manager, blockData())
@@ -307,8 +393,12 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
   test('real write conflict retries the losing callback on a fresh snapshot', async () => {
     let entered!: () => void
     let finish!: () => void
-    const hasEntered = new Promise<void>(resolve => { entered = resolve })
-    const canFinish = new Promise<void>(resolve => { finish = resolve })
+    const hasEntered = new Promise<void>((resolve) => {
+      entered = resolve
+    })
+    const canFinish = new Promise<void>((resolve) => {
+      finish = resolve
+    })
     const holding = withFacilityOccupancyGuard(facilityId, turfId, async () => {
       entered()
       await canFinish
@@ -317,7 +407,9 @@ describe('real isolated MongoDB transactions for BUG-08', { skip: !enabled, conc
     const losingSession = await mongoose.startSession()
     let attempts = 0
     let conflictObserved!: () => void
-    const sawConflict = new Promise<void>(resolve => { conflictObserved = resolve })
+    const sawConflict = new Promise<void>((resolve) => {
+      conflictObserved = resolve
+    })
     try {
       const competing = losingSession.withTransaction(async () => {
         attempts++
